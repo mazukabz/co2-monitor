@@ -7,6 +7,7 @@ on:
 
 env:
   INFISICAL_API_URL: https://eu.infisical.com
+  INFISICAL_PROJECT_ID: 04ac3c18-2975-4e2a-9a08-f5b831f13d9e
 
 jobs:
   deploy:
@@ -18,23 +19,49 @@ jobs:
           curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
           sudo apt-get update && sudo apt-get install -y infisical
 
-      - name: Get Infisical Token
-        id: infisical
+      - name: Get secrets from Infisical
+        id: secrets
         run: |
-          INFISICAL_TOKEN=$(infisical login --method=universal-auth \
+          # Login to Infisical
+          export INFISICAL_TOKEN=$(infisical login --method=universal-auth \
             --client-id=${{ secrets.INFISICAL_CLIENT_ID }} \
             --client-secret=${{ secrets.INFISICAL_CLIENT_SECRET }} \
+            --domain=https://eu.infisical.com \
             --silent --plain)
-          echo "::add-mask::$INFISICAL_TOKEN"
-          echo "token=$INFISICAL_TOKEN" >> $GITHUB_OUTPUT
+
+          # Export secrets to file (--recursive to include subfolders)
+          infisical export \
+            --projectId=${{ env.INFISICAL_PROJECT_ID }} \
+            --env=prod \
+            --domain=https://eu.infisical.com \
+            --recursive \
+            --format=dotenv > /tmp/secrets.env
+
+          # Load and output secrets for next steps
+          source /tmp/secrets.env
+
+          echo "::add-mask::$SSH_HOST"
+          echo "::add-mask::$SSH_USER"
+          echo "::add-mask::$SSH_PRIVATE_KEY"
+
+          echo "host=$SSH_HOST" >> $GITHUB_OUTPUT
+          echo "user=$SSH_USER" >> $GITHUB_OUTPUT
+          echo "port=22" >> $GITHUB_OUTPUT
+
+          # SSH key needs special handling (multiline)
+          echo "ssh_key<<EOF" >> $GITHUB_OUTPUT
+          echo "$SSH_PRIVATE_KEY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          rm /tmp/secrets.env
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
+          host: ${{ steps.secrets.outputs.host }}
+          username: ${{ steps.secrets.outputs.user }}
+          key: ${{ steps.secrets.outputs.ssh_key }}
+          port: ${{ steps.secrets.outputs.port }}
           script_stop: true
           script: |
             cd /opt/apps/co2
@@ -51,22 +78,23 @@ jobs:
             INFISICAL_TOKEN=$(infisical login --method=universal-auth \
               --client-id=${{ secrets.INFISICAL_CLIENT_ID }} \
               --client-secret=${{ secrets.INFISICAL_CLIENT_SECRET }} \
+              --domain=https://eu.infisical.com \
               --silent --plain)
             export INFISICAL_TOKEN
 
             # Deploy with secrets from Infisical
             infisical run \
-              --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+              --projectId=${{ env.INFISICAL_PROJECT_ID }} \
               --env=prod \
-              --recursive \
               --domain=https://eu.infisical.com \
+              --recursive \
               -- docker compose down
 
             infisical run \
-              --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+              --projectId=${{ env.INFISICAL_PROJECT_ID }} \
               --env=prod \
-              --recursive \
               --domain=https://eu.infisical.com \
+              --recursive \
               -- docker compose up -d --build
 
             # Wait for containers to start
@@ -74,10 +102,10 @@ jobs:
 
             # Run database migrations
             infisical run \
-              --projectId=${{ secrets.INFISICAL_PROJECT_ID }} \
+              --projectId=${{ env.INFISICAL_PROJECT_ID }} \
               --env=prod \
-              --recursive \
               --domain=https://eu.infisical.com \
+              --recursive \
               -- docker exec co2_processor alembic upgrade head
 
             # Show status
