@@ -26,7 +26,7 @@ def upgrade() -> None:
         sa.Column('device_uid', sa.String(length=50), nullable=False),
         sa.Column('name', sa.String(length=100), nullable=True),
         sa.Column('location', sa.String(length=200), nullable=True),
-        sa.Column('owner_telegram_id', sa.Integer(), nullable=True),
+        sa.Column('owner_telegram_id', sa.BigInteger(), nullable=True),
         sa.Column('firmware_version', sa.String(length=20), nullable=True),
         sa.Column('last_ip', sa.String(length=45), nullable=True),
         sa.Column('last_seen', sa.DateTime(), nullable=True),
