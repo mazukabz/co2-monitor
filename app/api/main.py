@@ -95,9 +95,9 @@ try:
 finally:
     os.unlink(tmp)
 
-print(f"Installed to {{INSTALL_DIR}}")
-print("\\nTo run: cd {{INSTALL_DIR}} && python3 main.py")
-print("To install service: cd {{INSTALL_DIR}} && sudo bash install_service.sh")
+print(f"Installed to " + INSTALL_DIR)
+print(f"\\nTo run: cd " + INSTALL_DIR + " && python3 main.py")
+print(f"To install service: cd " + INSTALL_DIR + " && sudo bash install_service.sh")
 '''
     return Response(content=script, media_type="text/x-python")
 
