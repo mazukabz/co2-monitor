@@ -5,9 +5,10 @@ Provides user interface for monitoring CO2 levels
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, Router, F
+from zoneinfo import ZoneInfo
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -87,6 +88,25 @@ def get_co2_status(co2: int) -> str:
     elif co2 < 1500:
         return "Проветрите"
     return "Критично"
+
+
+def format_datetime(dt: datetime, tz_name: str = "Europe/Moscow") -> str:
+    """Format datetime in user's timezone."""
+    if dt is None:
+        return "—"
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+
+    # If datetime is naive (no timezone), assume it's UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    # Convert to user's timezone
+    local_dt = dt.astimezone(tz)
+    return local_dt.strftime("%d.%m %H:%M")
 
 
 # ==================== HANDLERS ====================
@@ -261,6 +281,13 @@ async def cmd_devices(message: Message):
     user_id = message.from_user.id
 
     async with async_session_maker() as session:
+        # Get user's timezone
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        user_tz = user.timezone if user else "Europe/Moscow"
+
         if settings.is_admin(user_id):
             result = await session.execute(select(Device))
         else:
@@ -288,7 +315,7 @@ async def cmd_devices(message: Message):
             )
 
             if device.last_seen:
-                text += f"   Последняя связь: {device.last_seen.strftime('%d.%m %H:%M')}\n"
+                text += f"   Последняя связь: {format_datetime(device.last_seen, user_tz)}\n"
 
             text += "\n"
 

@@ -22,6 +22,9 @@ class User(Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # User's timezone (default Moscow)
+    timezone: Mapped[str] = mapped_column(String(50), default="Europe/Moscow")
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=datetime.utcnow
