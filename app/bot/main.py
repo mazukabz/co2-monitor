@@ -264,6 +264,10 @@ async def handle_admin_callback(callback: CallbackQuery):
 
 async def main():
     """Entry point."""
+    if not settings.bot_token:
+        logger.error("❌ BOT_TOKEN is not set! Cannot start bot.")
+        raise ValueError("BOT_TOKEN environment variable is required for bot service")
+
     logger.info("🚀 Starting CO2 Monitor Bot...")
 
     bot = Bot(token=settings.bot_token)

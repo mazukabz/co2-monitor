@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     postgres_db: str = "co2_db"
 
-    # Telegram Bot
-    bot_token: str
+    # Telegram Bot (optional - only required for co2_bot service)
+    bot_token: str = ""
     admin_user_ids: str = ""  # Comma-separated list of admin Telegram IDs
 
     # MQTT
