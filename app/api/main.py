@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "1.0.0"
-FIRMWARE_DATE = "2024-12-08"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Initial release with MQTT telemetry"
+FIRMWARE_VERSION = "1.0.1"
+FIRMWARE_DATE = "2025-12-08"  # YYYY-MM-DD format
+FIRMWARE_CHANGELOG = "Fix: use venv for systemd service"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")
@@ -191,14 +191,30 @@ else:
 
 SERVICE_NAME="co2-monitor"
 INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
-USER="$(whoami)"
+VENV_DIR="$INSTALL_DIR/venv"
+
+# Get the user who ran sudo (or current user if not sudo)
+if [ -n "$SUDO_USER" ]; then
+    SERVICE_USER="$SUDO_USER"
+else
+    SERVICE_USER="$(whoami)"
+fi
 
 echo "Installing CO2 Monitor service..."
 echo "Install dir: $INSTALL_DIR"
-echo "User: $USER"
+echo "Venv dir: $VENV_DIR"
+echo "Service user: $SERVICE_USER"
 
-# Install dependencies
-pip3 install -q -r "$INSTALL_DIR/requirements.txt"
+# Create virtual environment if not exists
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$VENV_DIR"
+fi
+
+# Install dependencies in venv
+echo "Installing dependencies..."
+"$VENV_DIR/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
 
 # Create service file
 cat > /tmp/$SERVICE_NAME.service << EOF
@@ -209,10 +225,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$USER
+User=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
 Environment="CO2_CONFIG_FILE=$INSTALL_DIR/config.json"
-ExecStart=/usr/bin/python3 $INSTALL_DIR/main.py
+Environment="DEMO_MODE=true"
+ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/main.py
 Restart=always
 RestartSec=30
 
@@ -220,10 +237,10 @@ RestartSec=30
 WantedBy=multi-user.target
 EOF
 
-sudo mv /tmp/$SERVICE_NAME.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable $SERVICE_NAME
-sudo systemctl start $SERVICE_NAME
+mv /tmp/$SERVICE_NAME.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable $SERVICE_NAME
+systemctl restart $SERVICE_NAME
 
 echo ""
 echo "Service installed and started!"
