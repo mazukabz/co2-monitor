@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "1.0.1"
+FIRMWARE_VERSION = "1.0.2"
 FIRMWARE_DATE = "2025-12-08"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Fix: use venv for systemd service"
+FIRMWARE_CHANGELOG = "Fix: correct MQTT port in config"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")
