@@ -72,12 +72,12 @@ jobs:
           script_stop: true
           script: |
             cd /opt/apps/co2
-            sudo git pull origin main
+            git pull origin main
 
             # Install Infisical CLI if not present
             if ! command -v infisical &> /dev/null; then
-              curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
-              sudo apt-get update && sudo apt-get install -y infisical
+              curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | bash
+              apt-get update && apt-get install -y infisical
             fi
 
             # Get token and export secrets
