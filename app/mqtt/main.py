@@ -5,7 +5,9 @@ Receives telemetry from devices and saves to database
 
 import asyncio
 import json
+import random
 import signal
+import string
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
@@ -16,6 +18,14 @@ from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.device import Device
 from app.models.telemetry import Telemetry
+
+
+def generate_activation_code() -> str:
+    """Generate random 8-character activation code."""
+    chars = string.ascii_uppercase + string.digits
+    # Remove ambiguous characters: O, 0, I, 1, L
+    chars = chars.replace("O", "").replace("0", "").replace("I", "").replace("1", "").replace("L", "")
+    return "".join(random.choices(chars, k=8))
 
 
 class MQTTProcessor:
@@ -104,15 +114,28 @@ class MQTTProcessor:
         device = result.scalar_one_or_none()
 
         if not device:
+            # Generate unique activation code
+            activation_code = generate_activation_code()
+
+            # Ensure code is unique
+            for _ in range(10):  # Max 10 attempts
+                existing = await session.execute(
+                    select(Device).where(Device.activation_code == activation_code)
+                )
+                if not existing.scalar_one_or_none():
+                    break
+                activation_code = generate_activation_code()
+
             device = Device(
                 device_uid=device_uid,
                 name=payload.get("name"),
                 firmware_version=payload.get("firmware_version"),
                 last_ip=payload.get("ip"),
+                activation_code=activation_code,
             )
             session.add(device)
             await session.flush()
-            print(f"🆕 Created new device: {device_uid}")
+            print(f"🆕 Created new device: {device_uid} (code: {activation_code})")
 
         return device
 

@@ -9,6 +9,10 @@ aiogram==3.3.0
 # MQTT
 paho-mqtt==2.0.0
 
+# API Server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
 # Configuration
 pydantic-settings==2.1.0
 

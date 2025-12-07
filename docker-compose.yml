@@ -88,27 +88,31 @@ services:
     restart: unless-stopped
     command: python -m app.bot.main
 
-  # API сервис (будущее) - раскомментировать когда понадобится
-  # co2_api:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: co2_api
-  #   environment:
-  #     - DATABASE_URL=${DATABASE_URL}
-  #     - MQTT_BROKER=co2_mqtt
-  #     - MQTT_PORT=1883
-  #     - TZ=${TZ:-Europe/Moscow}
-  #   ports:
-  #     # Внешний порт из Infisical, внутренний 8000
-  #     - "${API_PORT:-10900}:8000"
-  #   depends_on:
-  #     co2_db:
-  #       condition: service_healthy
-  #   networks:
-  #     - co2-network
-  #   restart: unless-stopped
-  #   command: python -m app.api.main
+  # API сервис - OTA updates для устройств
+  co2_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: co2_api
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - MQTT_BROKER=co2_mqtt
+      - MQTT_PORT=1883
+      - MQTT_PUBLIC_HOST=${SSH_HOST:-31.59.170.64}
+      - TZ=${TZ:-Europe/Moscow}
+    ports:
+      # Внешний порт из Infisical, внутренний 8000
+      - "${API_PORT:-10900}:8000"
+    volumes:
+      # Mount device scripts for OTA delivery
+      - ./device:/app/device:ro
+    depends_on:
+      co2_db:
+        condition: service_healthy
+    networks:
+      - co2-network
+    restart: unless-stopped
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
 
 networks:
   co2-network:

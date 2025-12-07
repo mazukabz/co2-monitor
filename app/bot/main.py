@@ -8,14 +8,17 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from sqlalchemy import select, desc
 
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.device import Device
 from app.models.telemetry import Telemetry
+from app.models.user import User
 
 
 # Setup logging
@@ -26,7 +29,43 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+# ==================== FSM STATES ====================
+
+class BindDevice(StatesGroup):
+    """States for device binding flow."""
+    waiting_for_code = State()
+
+
 # ==================== HELPERS ====================
+
+async def get_or_create_user(telegram_user) -> User:
+    """Get existing user or create new one."""
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if user:
+            # Update user info
+            user.username = telegram_user.username
+            user.first_name = telegram_user.first_name
+            user.last_name = telegram_user.last_name
+            user.last_activity = datetime.utcnow()
+        else:
+            # Create new user
+            user = User(
+                telegram_id=telegram_user.id,
+                username=telegram_user.username,
+                first_name=telegram_user.first_name,
+                last_name=telegram_user.last_name,
+                last_activity=datetime.utcnow()
+            )
+            session.add(user)
+
+        await session.commit()
+        return user
+
 
 def get_co2_emoji(co2: int) -> str:
     """Get emoji for CO2 level."""
@@ -57,12 +96,16 @@ async def cmd_start(message: Message):
     """Handle /start command."""
     user_id = message.from_user.id
 
+    # Create or update user in database
+    await get_or_create_user(message.from_user)
+
     text = (
         f"👋 <b>Добро пожаловать в CO2 Monitor!</b>\n\n"
         f"Ваш ID: <code>{user_id}</code>\n\n"
         f"<b>Команды:</b>\n"
         f"/status - текущие показания\n"
         f"/devices - список устройств\n"
+        f"/bind - привязать устройство\n"
         f"/help - справка\n"
     )
 
@@ -70,6 +113,94 @@ async def cmd_start(message: Message):
         text += f"\n/admin - админ-панель"
 
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("bind"))
+async def cmd_bind(message: Message, state: FSMContext):
+    """Handle /bind command - start device binding flow."""
+    await get_or_create_user(message.from_user)
+
+    text = (
+        "🔗 <b>Привязка устройства</b>\n\n"
+        "Введите код активации устройства.\n"
+        "Код указан на наклейке устройства (8 символов).\n\n"
+        "Пример: <code>AB12CD34</code>\n\n"
+        "Для отмены нажмите /cancel"
+    )
+
+    await state.set_state(BindDevice.waiting_for_code)
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Handle /cancel command - cancel current operation."""
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активной операции для отмены.")
+        return
+
+    await state.clear()
+    await message.answer("❌ Операция отменена.", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(BindDevice.waiting_for_code)
+async def process_activation_code(message: Message, state: FSMContext):
+    """Process entered activation code."""
+    code = message.text.strip().upper()
+    user_id = message.from_user.id
+
+    # Validate code format (8 alphanumeric characters)
+    if len(code) != 8 or not code.isalnum():
+        await message.answer(
+            "⚠️ Неверный формат кода.\n"
+            "Код должен содержать 8 букв и цифр.\n\n"
+            "Попробуйте ещё раз или /cancel для отмены."
+        )
+        return
+
+    async with async_session_maker() as session:
+        # Find device by activation code
+        result = await session.execute(
+            select(Device).where(Device.activation_code == code)
+        )
+        device = result.scalar_one_or_none()
+
+        if not device:
+            await message.answer(
+                "❌ Устройство с таким кодом не найдено.\n\n"
+                "Проверьте код и попробуйте снова или /cancel для отмены."
+            )
+            return
+
+        if device.owner_telegram_id:
+            if device.owner_telegram_id == user_id:
+                await message.answer(
+                    f"ℹ️ Устройство <b>{device.name or device.device_uid}</b> "
+                    f"уже привязано к вашему аккаунту.",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.answer(
+                    "⚠️ Это устройство уже привязано к другому пользователю.\n"
+                    "Обратитесь к администратору."
+                )
+            await state.clear()
+            return
+
+        # Bind device to user
+        device.owner_telegram_id = user_id
+        await session.commit()
+
+        await state.clear()
+        await message.answer(
+            f"✅ <b>Устройство успешно привязано!</b>\n\n"
+            f"📱 {device.name or device.device_uid}\n"
+            f"📍 {device.location or 'Расположение не указано'}\n\n"
+            f"Теперь вы будете получать данные с этого устройства.\n"
+            f"Используйте /status для просмотра показаний.",
+            parse_mode="HTML"
+        )
 
 
 @router.message(Command("status"))
@@ -91,7 +222,7 @@ async def cmd_status(message: Message):
         if not devices:
             await message.answer(
                 "📭 У вас нет привязанных устройств.\n"
-                "Используйте /add для добавления."
+                "Используйте /bind для привязки устройства."
             )
             return
 
@@ -173,6 +304,7 @@ async def cmd_help(message: Message):
         "/start - начало работы\n"
         "/status - текущие показания CO2\n"
         "/devices - список устройств\n"
+        "/bind - привязать устройство\n"
         "/help - эта справка\n\n"
         "<b>Уровни CO2:</b>\n"
         "🟢 &lt; 800 ppm - Отлично\n"

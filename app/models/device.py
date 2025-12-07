@@ -3,7 +3,7 @@ Device model - represents a physical CO2 monitor device
 """
 
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, Integer
+from sqlalchemy import String, Boolean, DateTime, BigInteger
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -19,6 +19,9 @@ class Device(Base):
     name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     location: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # Activation code for device binding (e.g., "AB12CD34")
+    activation_code: Mapped[str | None] = mapped_column(String(8), unique=True, index=True, nullable=True)
+
     # Device info
     firmware_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
@@ -28,7 +31,7 @@ class Device(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Owner (Telegram user ID)
-    owner_telegram_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    owner_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
