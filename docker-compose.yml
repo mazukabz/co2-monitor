@@ -97,8 +97,8 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - MQTT_BROKER=co2_mqtt
-      - MQTT_PORT=${MQTT_PORT:-10883}
-      - MQTT_PUBLIC_HOST=${SSH_HOST:-31.59.170.64}
+      - MQTT_EXTERNAL_PORT=${MQTT_EXTERNAL_PORT}
+      - MQTT_PUBLIC_HOST=${SSH_HOST}
       - TZ=${TZ:-Europe/Moscow}
     ports:
       # Внешний порт из Infisical, внутренний 8000

@@ -35,9 +35,9 @@ if not DEVICE_DIR.exists():
     # Fallback for local development
     DEVICE_DIR = Path(__file__).parent.parent.parent / "device"
 
-# Server public address for device config
-SERVER_HOST = os.getenv("MQTT_PUBLIC_HOST", "31.59.170.64")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "10883"))
+# Server public address for device config (from Infisical)
+SERVER_HOST = os.getenv("MQTT_PUBLIC_HOST")
+MQTT_PORT = int(os.getenv("MQTT_EXTERNAL_PORT"))
 
 
 def get_file_hash(filepath: Path) -> str:
