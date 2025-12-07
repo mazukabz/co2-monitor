@@ -1,0 +1,16 @@
+# Database
+sqlalchemy[asyncio]==2.0.23
+asyncpg==0.29.0
+alembic==1.13.1
+
+# Telegram Bot
+aiogram==3.3.0
+
+# MQTT
+paho-mqtt==2.0.0
+
+# Configuration
+pydantic-settings==2.1.0
+
+# Utilities
+python-dotenv==1.0.0
