@@ -29,13 +29,20 @@ jobs:
             --domain=https://eu.infisical.com \
             --silent --plain)
 
-          # Export secrets to file (--recursive to include subfolders)
+          # Export secrets from both folders
           infisical export \
             --projectId=${{ env.INFISICAL_PROJECT_ID }} \
             --env=prod \
             --domain=https://eu.infisical.com \
-            --recursive \
+            --path=/co2_configs \
             --format=dotenv > /tmp/secrets.env
+
+          infisical export \
+            --projectId=${{ env.INFISICAL_PROJECT_ID }} \
+            --env=prod \
+            --domain=https://eu.infisical.com \
+            --path=/co2_secrets \
+            --format=dotenv >> /tmp/secrets.env
 
           # Load and output secrets for next steps
           source /tmp/secrets.env
