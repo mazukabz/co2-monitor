@@ -6,7 +6,8 @@ Runs on Raspberry Pi / ESP32
 This script:
 1. Reads CO2/temperature/humidity from SCD41 sensor
 2. Sends data to MQTT broker
-3. Listens for configuration updates
+3. Displays readings on LCD/OLED (optional, can be disabled)
+4. Listens for configuration updates
 """
 
 import json
@@ -20,17 +21,93 @@ import paho.mqtt.client as mqtt
 # These should be set via environment or config file on device
 
 DEVICE_UID = "co2_001"  # Unique device identifier
-MQTT_BROKER = "your-server.com"  # Your server IP or domain
+MQTT_BROKER = "31.59.170.64"  # Server IP
 MQTT_PORT = 10883  # External MQTT port
 
 # Intervals (seconds)
 REPORT_INTERVAL = 30  # How often to send data
+
+# Display settings
+DISPLAY_ENABLED = True  # Set to False to disable display output
 
 # ==================== MQTT TOPICS ====================
 TOPIC_TELEMETRY = f"devices/{DEVICE_UID}/telemetry"
 TOPIC_CONFIG = f"devices/{DEVICE_UID}/config"
 TOPIC_COMMANDS = f"devices/{DEVICE_UID}/commands"
 TOPIC_STATUS = f"devices/{DEVICE_UID}/status"
+
+
+# ==================== DISPLAY ====================
+
+class Display:
+    """LCD/OLED Display wrapper (e.g., SSD1306, LCD1602, etc.)"""
+
+    def __init__(self):
+        self.initialized = False
+        self.display = None
+
+    def init(self) -> bool:
+        """Initialize display."""
+        if not DISPLAY_ENABLED:
+            print("📺 Display disabled")
+            return True
+
+        try:
+            # TODO: Add real display initialization
+            # For SSD1306 OLED:
+            # import board
+            # import adafruit_ssd1306
+            # i2c = board.I2C()
+            # self.display = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c)
+
+            # For LCD1602 with I2C:
+            # from RPLCD.i2c import CharLCD
+            # self.display = CharLCD('PCF8574', 0x27)
+
+            self.initialized = True
+            print("📺 Display initialized")
+            return True
+        except Exception as e:
+            print(f"⚠️ Display init error (continuing without display): {e}")
+            return True  # Don't fail if display not available
+
+    def show(self, co2: int, temp: float, humidity: float):
+        """Display readings on screen."""
+        if not DISPLAY_ENABLED or not self.initialized:
+            return
+
+        try:
+            # TODO: Replace with real display code
+            # For SSD1306 OLED:
+            # self.display.fill(0)
+            # self.display.text(f"CO2: {co2} ppm", 0, 0, 1)
+            # self.display.text(f"Temp: {temp:.1f} C", 0, 20, 1)
+            # self.display.text(f"Hum: {humidity:.0f}%", 0, 40, 1)
+            # self.display.show()
+
+            # For LCD1602:
+            # self.display.clear()
+            # self.display.write_string(f"CO2:{co2}ppm T:{temp:.0f}C")
+            # self.display.cursor_pos = (1, 0)
+            # self.display.write_string(f"Humidity: {humidity:.0f}%")
+
+            # Console output for testing
+            print(f"📺 Display: CO2={co2}ppm | T={temp:.1f}°C | H={humidity:.0f}%")
+
+        except Exception as e:
+            print(f"⚠️ Display error: {e}")
+
+    def show_status(self, message: str):
+        """Show status message."""
+        if not DISPLAY_ENABLED or not self.initialized:
+            return
+        print(f"📺 Status: {message}")
+
+    def clear(self):
+        """Clear display."""
+        if not DISPLAY_ENABLED or not self.initialized:
+            return
+        # TODO: self.display.fill(0) / self.display.clear()
 
 
 # ==================== SENSOR (mock for now) ====================
@@ -90,6 +167,7 @@ class CO2Device:
 
     def __init__(self):
         self.sensor = CO2Sensor()
+        self.display = Display()
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
@@ -99,7 +177,8 @@ class CO2Device:
         self.config = {
             "report_interval": REPORT_INTERVAL,
             "alerts_enabled": True,
-            "co2_threshold": 1000
+            "co2_threshold": 1000,
+            "display_enabled": DISPLAY_ENABLED
         }
 
         self.running = False
@@ -158,6 +237,12 @@ class CO2Device:
         if "co2_threshold" in config:
             self.config["co2_threshold"] = config["co2_threshold"]
 
+        if "display_enabled" in config:
+            self.config["display_enabled"] = config["display_enabled"]
+            global DISPLAY_ENABLED
+            DISPLAY_ENABLED = config["display_enabled"]
+            print(f"📺 Display {'enabled' if DISPLAY_ENABLED else 'disabled'}")
+
     def _execute_command(self, command: dict):
         """Execute a command from server."""
         cmd = command.get("command")
@@ -172,11 +257,15 @@ class CO2Device:
             self._send_telemetry()
 
     def _send_telemetry(self):
-        """Send current sensor data to server."""
+        """Send current sensor data to server and update display."""
         data = self.sensor.read()
         if not data:
             return
 
+        # Update display with current readings
+        self.display.show(data["co2"], data["temperature"], data["humidity"])
+
+        # Send to server
         payload = {
             "device_uid": DEVICE_UID,
             "timestamp": int(time.time()),
@@ -196,11 +285,19 @@ class CO2Device:
         print("🚀 CO2 Monitor Device Starting...")
         print(f"📱 Device UID: {DEVICE_UID}")
         print(f"📡 MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
+        print(f"📺 Display: {'enabled' if DISPLAY_ENABLED else 'disabled'}")
+
+        # Initialize display
+        self.display.init()
+        self.display.show_status("Starting...")
 
         # Initialize sensor
         if not self.sensor.init():
             print("❌ Failed to initialize sensor")
+            self.display.show_status("Sensor ERROR!")
             return
+
+        self.display.show_status("Connecting...")
 
         # Set Last Will and Testament (offline status when disconnected)
         self.client.will_set(TOPIC_STATUS, "offline", retain=True)
