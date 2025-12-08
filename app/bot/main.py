@@ -124,6 +124,22 @@ def get_live_duration_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def get_history_period_keyboard() -> InlineKeyboardMarkup:
+    """Get inline keyboard for history period selection."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1 час", callback_data="history:1"),
+            InlineKeyboardButton(text="6 часов", callback_data="history:6"),
+            InlineKeyboardButton(text="12 часов", callback_data="history:12"),
+        ],
+        [
+            InlineKeyboardButton(text="24 часа", callback_data="history:24"),
+            InlineKeyboardButton(text="7 дней", callback_data="history:168"),
+            InlineKeyboardButton(text="30 дней", callback_data="history:720"),
+        ],
+    ])
+
+
 def get_live_stop_keyboard() -> InlineKeyboardMarkup:
     """Get inline keyboard to stop live mode."""
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -251,6 +267,7 @@ async def setup_bot_commands(bot: Bot):
         BotCommand(command="start", description="🚀 Начать работу"),
         BotCommand(command="status", description="📊 Текущие показания"),
         BotCommand(command="report", description="📈 Отчёт за период"),
+        BotCommand(command="history", description="📋 История показаний"),
         BotCommand(command="live", description="📡 Live режим"),
         BotCommand(command="devices", description="📱 Мои устройства"),
         BotCommand(command="bind", description="🔗 Привязать устройство"),
@@ -533,6 +550,17 @@ async def cmd_settings(message: Message):
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
+@router.message(Command("history"))
+async def cmd_history(message: Message):
+    """Handle /history command - show aggregated telemetry history."""
+    await message.answer(
+        "📋 <b>История показаний</b>\n\n"
+        "Выберите период для просмотра усреднённых данных:",
+        reply_markup=get_history_period_keyboard(),
+        parse_mode="HTML"
+    )
+
+
 @router.message(Command("live"))
 async def cmd_live(message: Message):
     """Handle /live command - start live monitoring mode."""
@@ -567,11 +595,13 @@ async def cmd_help(message: Message):
         "<b>🎛 Основные функции:</b>\n"
         "📊 <b>Статус</b> — текущие показания\n"
         "📈 <b>Отчёт</b> — график за период\n"
+        "📋 <b>История</b> — список показаний\n"
         "📡 <b>Live</b> — режим реального времени\n"
         "⚙️ <b>Настройки</b> — уведомления\n\n"
         "<b>📋 Команды:</b>\n"
         "/status — текущие показания\n"
         "/report — отчёт за период\n"
+        "/history — история показаний\n"
         "/live — режим реального времени\n"
         "/devices — список устройств\n"
         "/bind — привязать устройство\n"
@@ -1064,6 +1094,115 @@ async def callback_settings(callback: CallbackQuery, state: FSMContext):
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         except Exception:
             pass
+
+
+@router.callback_query(F.data.startswith("history:"))
+async def callback_history(callback: CallbackQuery):
+    """Handle history period selection - show aggregated telemetry data."""
+    user_id = callback.from_user.id
+    period_hours = int(callback.data.split(":")[1])
+
+    period_labels = {
+        1: "1 час", 6: "6 часов", 12: "12 часов",
+        24: "24 часа", 168: "7 дней", 720: "30 дней",
+    }
+    period_label = period_labels.get(period_hours, f"{period_hours} ч")
+
+    await callback.answer(f"Загружаю историю за {period_label}...")
+
+    async with async_session_maker() as session:
+        # Get user timezone
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        user_tz = user.timezone if user else "Europe/Moscow"
+
+        try:
+            tz = ZoneInfo(user_tz)
+        except Exception:
+            tz = ZoneInfo("Europe/Moscow")
+
+        # Get user's device
+        if settings.is_admin(user_id):
+            result = await session.execute(select(Device).limit(1))
+        else:
+            result = await session.execute(
+                select(Device).where(Device.owner_telegram_id == user_id).limit(1)
+            )
+        device = result.scalar_one_or_none()
+
+        if not device:
+            await callback.message.edit_text(
+                "📭 Нет привязанных устройств",
+                parse_mode="HTML"
+            )
+            return
+
+        # Get telemetry for period
+        since = datetime.utcnow() - timedelta(hours=period_hours)
+        telemetry_result = await session.execute(
+            select(Telemetry)
+            .where(and_(
+                Telemetry.device_id == device.id,
+                Telemetry.timestamp >= since
+            ))
+            .order_by(Telemetry.timestamp)
+        )
+        telemetry_list = telemetry_result.scalars().all()
+
+        if not telemetry_list:
+            await callback.message.edit_text(
+                f"📭 Нет данных за {period_label}",
+                parse_mode="HTML"
+            )
+            return
+
+        # Determine number of buckets: 12 for < 24h, 24 for >= 24h
+        num_buckets = 24 if period_hours >= 24 else 12
+        bucket_size = len(telemetry_list) // num_buckets if len(telemetry_list) >= num_buckets else 1
+
+        # Aggregate data into buckets
+        aggregated = []
+        for i in range(0, len(telemetry_list), max(bucket_size, 1)):
+            bucket = telemetry_list[i:i + bucket_size]
+            if bucket:
+                avg_co2 = sum(t.co2 for t in bucket) // len(bucket)
+                avg_temp = sum(t.temperature for t in bucket) / len(bucket)
+                avg_humidity = sum(t.humidity for t in bucket) / len(bucket)
+                timestamp = bucket[len(bucket) // 2].timestamp  # Middle timestamp
+
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                local_time = timestamp.astimezone(tz)
+
+                aggregated.append({
+                    'time': local_time.strftime("%H:%M") if period_hours <= 24 else local_time.strftime("%d.%m %H:%M"),
+                    'co2': avg_co2,
+                    'temp': avg_temp,
+                    'humidity': avg_humidity
+                })
+
+            if len(aggregated) >= num_buckets:
+                break
+
+        # Build response text
+        device_name = device.name or device.device_uid
+        text = f"📋 <b>История: {period_label}</b>\n"
+        text += f"📱 {device_name}\n\n"
+
+        for entry in aggregated:
+            emoji = get_co2_emoji(entry['co2'])
+            text += f"<code>{entry['time']}</code>  {emoji} <b>{entry['co2']}</b> ppm  🌡{entry['temp']:.1f}°  💧{entry['humidity']:.0f}%\n"
+
+        # Add summary
+        all_co2 = [e['co2'] for e in aggregated]
+        if all_co2:
+            text += f"\n<b>Статистика:</b>\n"
+            text += f"Среднее: {sum(all_co2) // len(all_co2)} ppm\n"
+            text += f"Мин: {min(all_co2)} ppm | Макс: {max(all_co2)} ppm"
+
+        await callback.message.edit_text(text, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("live:"))
