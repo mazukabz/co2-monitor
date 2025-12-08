@@ -410,7 +410,35 @@ def _smooth_data(values: list, window: int = 5) -> list:
     return smoothed
 
 
-def _spline_smooth(times: list, values: list, num_points: int = 300) -> tuple:
+def _aggregate_data(times: list, values: list, group_size: int) -> tuple:
+    """
+    Aggregate data by averaging groups of points.
+    This reduces noise before spline interpolation.
+    """
+    if group_size <= 1 or len(times) < group_size * 2:
+        return times, values
+
+    agg_times = []
+    agg_values = []
+
+    for i in range(0, len(times) - group_size + 1, group_size):
+        chunk_times = times[i:i + group_size]
+        chunk_values = values[i:i + group_size]
+
+        # Use middle time point
+        mid_idx = len(chunk_times) // 2
+        agg_times.append(chunk_times[mid_idx])
+        agg_values.append(sum(chunk_values) / len(chunk_values))
+
+    # Always include the last point for continuity
+    if agg_times and agg_times[-1] != times[-1]:
+        agg_times.append(times[-1])
+        agg_values.append(values[-1])
+
+    return agg_times, agg_values
+
+
+def _spline_smooth(times: list, values: list, num_points: int = 100) -> tuple:
     """Create smooth spline interpolation for Apple Stocks-style curves."""
     if len(times) < 4:
         return times, values
@@ -429,6 +457,47 @@ def _spline_smooth(times: list, values: list, num_points: int = 300) -> tuple:
         return x_datetime, y_smooth.tolist()
     except Exception:
         return times, values
+
+
+def _smooth_for_period(times: list, values: list, period_hours: int) -> tuple:
+    """
+    Apply appropriate smoothing based on period.
+
+    Smoothing rules:
+    - 1 hour: aggregate every 2 points, 50 spline points
+    - 6 hours: aggregate every 4 points, 80 spline points
+    - 12-24 hours: aggregate every 6 points, 100 spline points
+    - 7 days: aggregate every 12 points, 120 spline points
+    - 30 days: aggregate every 24 points, 150 spline points
+    """
+    if len(times) < 4:
+        return times, values
+
+    # Determine aggregation and spline parameters based on period
+    if period_hours <= 1:
+        group_size = 2
+        spline_points = 50
+    elif period_hours <= 6:
+        group_size = 4
+        spline_points = 80
+    elif period_hours <= 24:
+        group_size = 6
+        spline_points = 100
+    elif period_hours <= 168:  # 7 days
+        group_size = 12
+        spline_points = 120
+    else:  # 30 days
+        group_size = 24
+        spline_points = 150
+
+    # Step 1: Aggregate to reduce noise
+    agg_times, agg_values = _aggregate_data(times, values, group_size)
+
+    # Step 2: Apply spline smoothing
+    if len(agg_times) >= 4:
+        return _spline_smooth(agg_times, agg_values, spline_points)
+    else:
+        return agg_times, agg_values
 
 
 def _resample_data(times: list, values: list, target_points: int = 100) -> tuple:
@@ -539,8 +608,8 @@ def generate_period_report(
         else:
             sleep_quality = ("Плохо", COLORS['accent_red'])
 
-    # Smooth data with spline interpolation for Apple Stocks-style curves
-    chart_times, chart_co2 = _spline_smooth(times, co2_values, num_points=300)
+    # Smooth data with period-appropriate smoothing for Apple Stocks-style curves
+    chart_times, chart_co2 = _smooth_for_period(times, co2_values, period_hours)
 
     # === CREATE FIGURE - Apple style proportions ===
     fig = plt.figure(figsize=(12, 18), facecolor=COLORS['bg_dark'])
