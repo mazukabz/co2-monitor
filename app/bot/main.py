@@ -5,6 +5,7 @@ Provides user interface for monitoring CO2 levels
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone, timedelta, time
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -21,7 +22,7 @@ from app.core.database import async_session_maker
 from app.models.device import Device
 from app.models.telemetry import Telemetry
 from app.models.user import User
-from app.services.charts import generate_morning_report, generate_evening_report, generate_24h_report
+from app.services.charts import generate_morning_report, generate_evening_report, generate_24h_report, generate_period_report
 
 
 # Setup logging
@@ -469,8 +470,71 @@ async def cmd_evening(message: Message):
 
 @router.message(Command("report"))
 async def cmd_report(message: Message):
-    """Handle /report command - generate comprehensive 24-hour report."""
-    user_id = message.from_user.id
+    """Handle /report command - show period selection."""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1 час", callback_data="report:1"),
+            InlineKeyboardButton(text="6 часов", callback_data="report:6"),
+            InlineKeyboardButton(text="12 часов", callback_data="report:12"),
+        ],
+        [
+            InlineKeyboardButton(text="24 часа", callback_data="report:24"),
+            InlineKeyboardButton(text="7 дней", callback_data="report:168"),
+            InlineKeyboardButton(text="30 дней", callback_data="report:720"),
+        ],
+    ])
+
+    await message.answer(
+        "📊 <b>Выберите период для отчёта:</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+# Fun loading messages for report generation
+LOADING_MESSAGES = [
+    "🎨 Рисую красивый график...",
+    "📊 Анализирую данные о вашем воздухе...",
+    "🔬 Исследую молекулы CO2...",
+    "🌬️ Считаю каждую молекулу...",
+    "📈 Строю инфографику...",
+    "🎯 Вычисляю статистику...",
+    "🖌️ Добавляю последние штрихи...",
+    "🔮 Предсказываю качество воздуха...",
+    "🌡️ Измеряю температуру данных...",
+    "💨 Обрабатываю воздушные потоки...",
+]
+
+
+@router.callback_query(F.data.startswith("report:"))
+async def callback_report_period(callback: CallbackQuery):
+    """Handle report period selection."""
+    period_hours = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    # Period labels
+    period_labels = {
+        1: "1 час",
+        6: "6 часов",
+        12: "12 часов",
+        24: "24 часа",
+        168: "7 дней",
+        720: "30 дней",
+    }
+    period_label = period_labels.get(period_hours, f"{period_hours} ч")
+
+    # Show fun loading message
+    loading_msg = random.choice(LOADING_MESSAGES)
+    await callback.answer(loading_msg, show_alert=False)
+
+    # Edit message to show loading
+    try:
+        await callback.message.edit_text(
+            f"⏳ <b>{loading_msg}</b>\n\nПериод: {period_label}",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
     async with async_session_maker() as session:
         user_result = await session.execute(
@@ -489,13 +553,13 @@ async def cmd_report(message: Message):
         devices = result.scalars().all()
 
         if not devices:
-            await message.answer(
+            await callback.message.edit_text(
                 "📭 У вас нет привязанных устройств.\n"
                 "Используйте /bind для привязки."
             )
             return
 
-        since = datetime.utcnow() - timedelta(hours=24)
+        since = datetime.utcnow() - timedelta(hours=period_hours)
 
         for device in devices:
             telemetry_result = await session.execute(
@@ -509,8 +573,8 @@ async def cmd_report(message: Message):
             telemetry_list = telemetry_result.scalars().all()
 
             if not telemetry_list:
-                await message.answer(
-                    f"📭 Нет данных за последние 24 часа для <b>{device.name or device.device_uid}</b>",
+                await callback.message.answer(
+                    f"📭 Нет данных за {period_label} для <b>{device.name or device.device_uid}</b>",
                     parse_mode="HTML"
                 )
                 continue
@@ -525,16 +589,24 @@ async def cmd_report(message: Message):
                 for t in telemetry_list
             ]
 
-            chart_buf = generate_24h_report(
+            chart_buf = generate_period_report(
                 data,
                 device.name or device.device_uid,
-                user_tz
+                user_tz,
+                period_hours,
+                period_label
             )
 
-            await message.answer_photo(
-                BufferedInputFile(chart_buf.read(), filename="24h_report.png"),
-                caption=f"📊 Отчёт за 24 часа — {device.name or device.device_uid}"
+            await callback.message.answer_photo(
+                BufferedInputFile(chart_buf.read(), filename=f"report_{period_hours}h.png"),
+                caption=f"📊 Отчёт за {period_label} — {device.name or device.device_uid}"
             )
+
+    # Delete the period selection message
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
 
 @router.message(Command("settings"))
@@ -749,18 +821,134 @@ async def process_evening_time(message: Message, state: FSMContext):
     await message.answer(f"✅ Время вечернего отчёта: {new_time.strftime('%H:%M')}")
 
 
+def get_menu_keyboard() -> InlineKeyboardMarkup:
+    """Get inline keyboard with all main commands."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📊 Отчёт", callback_data="menu:report"),
+            InlineKeyboardButton(text="📈 Статус", callback_data="menu:status"),
+        ],
+        [
+            InlineKeyboardButton(text="🌙 Ночной", callback_data="menu:morning"),
+            InlineKeyboardButton(text="☀️ Дневной", callback_data="menu:evening"),
+        ],
+        [
+            InlineKeyboardButton(text="📱 Устройства", callback_data="menu:devices"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
+        ],
+        [
+            InlineKeyboardButton(text="🔗 Привязать", callback_data="menu:bind"),
+            InlineKeyboardButton(text="❓ Справка", callback_data="menu:help"),
+        ],
+    ])
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message):
+    """Handle /menu command - show main menu with buttons."""
+    await message.answer(
+        "📋 <b>Главное меню</b>\n\nВыберите действие:",
+        reply_markup=get_menu_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("menu:"))
+async def callback_menu(callback: CallbackQuery):
+    """Handle menu button clicks."""
+    action = callback.data.split(":")[1]
+
+    # Map actions to commands
+    if action == "report":
+        await callback.message.delete()
+        # Show report period selection
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="1 час", callback_data="report:1"),
+                InlineKeyboardButton(text="6 часов", callback_data="report:6"),
+                InlineKeyboardButton(text="12 часов", callback_data="report:12"),
+            ],
+            [
+                InlineKeyboardButton(text="24 часа", callback_data="report:24"),
+                InlineKeyboardButton(text="7 дней", callback_data="report:168"),
+                InlineKeyboardButton(text="30 дней", callback_data="report:720"),
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")],
+        ])
+        await callback.message.answer(
+            "📊 <b>Выберите период для отчёта:</b>",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    elif action == "back":
+        await callback.message.edit_text(
+            "📋 <b>Главное меню</b>\n\nВыберите действие:",
+            reply_markup=get_menu_keyboard(),
+            parse_mode="HTML"
+        )
+    elif action == "help":
+        await callback.message.delete()
+        text = (
+            "📖 <b>Справка CO2 Monitor</b>\n\n"
+            "<b>Основные команды:</b>\n"
+            "/menu - главное меню\n"
+            "/status - текущие показания CO2\n"
+            "/devices - список устройств\n"
+            "/bind - привязать устройство\n\n"
+            "<b>Графики и отчёты:</b>\n"
+            "/report - отчёт (выбор периода)\n"
+            "/morning - ночной отчёт (качество сна)\n"
+            "/evening - дневной отчёт\n\n"
+            "<b>Настройки:</b>\n"
+            "/settings - настройки уведомлений\n\n"
+            "<b>Уровни CO2:</b>\n"
+            "🟢 &lt; 800 ppm - Отлично\n"
+            "🟡 800-1000 ppm - Хорошо\n"
+            "🟠 1000-1500 ppm - Проветрите\n"
+            "🔴 &gt; 1500 ppm - Критично\n"
+        )
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📋 Меню", callback_data="menu:back_to_menu")]]
+        ))
+    elif action == "back_to_menu":
+        await callback.message.delete()
+        await callback.message.answer(
+            "📋 <b>Главное меню</b>\n\nВыберите действие:",
+            reply_markup=get_menu_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        # For other actions, simulate command
+        await callback.message.delete()
+        # Create fake message to call command handlers
+        if action == "status":
+            await cmd_status(callback.message)
+        elif action == "devices":
+            await cmd_devices(callback.message)
+        elif action == "morning":
+            await cmd_morning(callback.message)
+        elif action == "evening":
+            await cmd_evening(callback.message)
+        elif action == "settings":
+            await cmd_settings(callback.message)
+        elif action == "bind":
+            await cmd_bind(callback.message)
+
+    await callback.answer()
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Handle /help command."""
     text = (
         "📖 <b>Справка CO2 Monitor</b>\n\n"
         "<b>Основные команды:</b>\n"
-        "/start - начало работы\n"
+        "/menu - главное меню с кнопками\n"
         "/status - текущие показания CO2\n"
         "/devices - список устройств\n"
         "/bind - привязать устройство\n\n"
         "<b>Графики и отчёты:</b>\n"
-        "/report - отчёт за 24 часа\n"
+        "/report - отчёт (выбор периода)\n"
         "/morning - ночной отчёт (качество сна)\n"
         "/evening - дневной отчёт\n\n"
         "<b>Настройки:</b>\n"
@@ -771,7 +959,9 @@ async def cmd_help(message: Message):
         "🟠 1000-1500 ppm - Проветрите\n"
         "🔴 &gt; 1500 ppm - Критично\n"
     )
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📋 Открыть меню", callback_data="menu:back_to_menu")]]
+    ))
 
 
 @router.message(Command("admin"))
