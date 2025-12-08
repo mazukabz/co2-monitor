@@ -13,11 +13,11 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     BufferedInputFile, Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    ReplyKeyboardMarkup, KeyboardButton,
     BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 )
 from zoneinfo import ZoneInfo
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, desc, and_
@@ -199,7 +199,7 @@ async def setup_bot_commands(bot: Bot):
         BotCommand(command="admin", description="🔧 Админ-панель"),
     ]
 
-    for admin_id in settings.admin_user_ids:
+    for admin_id in settings.admin_ids_list:
         try:
             await bot.set_my_commands(
                 admin_commands,
