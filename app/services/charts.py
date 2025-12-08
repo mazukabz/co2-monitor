@@ -1,6 +1,7 @@
 """
 Charts Service - generates infographics for CO2 monitoring
-Uses matplotlib + seaborn for server-side PNG generation
+Uses matplotlib for server-side PNG generation
+Apple-inspired design: clean, minimal, with subtle gradients
 """
 
 import matplotlib
@@ -8,21 +9,37 @@ matplotlib.use('Agg')  # Headless mode - must be before pyplot import
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import seaborn as sns
+import matplotlib.patches as mpatches
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap
+import numpy as np
 from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-# Set seaborn style
-sns.set_theme(style="whitegrid", palette="husl")
+# Apple-inspired color palette
+COLORS = {
+    'bg_dark': '#1C1C1E',        # Dark background
+    'bg_card': '#2C2C2E',        # Card background
+    'text_primary': '#FFFFFF',   # Primary text
+    'text_secondary': '#8E8E93', # Secondary text
+    'accent_green': '#30D158',   # Excellent - Apple green
+    'accent_yellow': '#FFD60A',  # Good - Apple yellow
+    'accent_orange': '#FF9F0A',  # Moderate - Apple orange
+    'accent_red': '#FF453A',     # Bad - Apple red
+    'accent_blue': '#0A84FF',    # Info - Apple blue
+    'accent_cyan': '#64D2FF',    # Secondary info
+    'accent_purple': '#BF5AF2',  # Highlight
+    'grid': '#3A3A3C',           # Grid lines
+}
 
-# CO2 level thresholds and colors
+# CO2 level thresholds and colors (Apple style)
 CO2_LEVELS = {
-    'excellent': {'max': 800, 'color': '#22c55e', 'label': 'Отлично'},
-    'good': {'max': 1000, 'color': '#eab308', 'label': 'Хорошо'},
-    'moderate': {'max': 1500, 'color': '#f97316', 'label': 'Проветрить'},
-    'bad': {'max': float('inf'), 'color': '#ef4444', 'label': 'Критично'},
+    'excellent': {'max': 800, 'color': COLORS['accent_green'], 'label': 'Отлично'},
+    'good': {'max': 1000, 'color': COLORS['accent_yellow'], 'label': 'Хорошо'},
+    'moderate': {'max': 1500, 'color': COLORS['accent_orange'], 'label': 'Проветрить'},
+    'bad': {'max': float('inf'), 'color': COLORS['accent_red'], 'label': 'Критично'},
 }
 
 
@@ -396,17 +413,390 @@ def generate_weekly_summary(
     return buf
 
 
+def _setup_dark_style(ax, show_grid=True):
+    """Apply Apple-style dark theme to axis."""
+    ax.set_facecolor(COLORS['bg_card'])
+    ax.tick_params(colors=COLORS['text_secondary'], labelsize=9)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(COLORS['grid'])
+    ax.spines['left'].set_color(COLORS['grid'])
+    if show_grid:
+        ax.grid(True, color=COLORS['grid'], alpha=0.3, linestyle='-', linewidth=0.5)
+    ax.set_axisbelow(True)
+
+
+def _draw_gradient_line(ax, x, y, colors_list, linewidth=2.5):
+    """Draw a line with gradient colors based on values."""
+    points = np.array([mdates.date2num(x), y]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    lc = LineCollection(segments, colors=colors_list[:-1], linewidths=linewidth, capstyle='round')
+    ax.add_collection(lc)
+    return lc
+
+
+def _create_ring_chart(ax, percentages, colors_list, labels):
+    """Create Apple-style ring/donut chart."""
+    ax.set_facecolor(COLORS['bg_card'])
+
+    # Filter out zero values
+    filtered = [(p, c, l) for p, c, l in zip(percentages, colors_list, labels) if p > 0]
+    if not filtered:
+        ax.text(0.5, 0.5, 'Нет данных', ha='center', va='center',
+                color=COLORS['text_secondary'], fontsize=12)
+        ax.axis('off')
+        return
+
+    sizes, cols, lbls = zip(*filtered)
+
+    # Create donut chart
+    wedges, texts, autotexts = ax.pie(
+        sizes,
+        colors=cols,
+        autopct=lambda p: f'{p:.0f}%' if p > 5 else '',
+        startangle=90,
+        pctdistance=0.75,
+        wedgeprops=dict(width=0.5, edgecolor=COLORS['bg_card'], linewidth=2)
+    )
+
+    for autotext in autotexts:
+        autotext.set_color(COLORS['text_primary'])
+        autotext.set_fontsize(10)
+        autotext.set_fontweight('bold')
+
+    ax.axis('equal')
+
+
+def _create_gradient_fill(ax, times, values, color, alpha_top=0.4, alpha_bottom=0.0):
+    """Create Apple Stocks-style gradient fill under the line."""
+    # Convert to arrays
+    x = mdates.date2num(times)
+    y = np.array(values)
+
+    # Create polygon vertices for fill
+    verts = [(x[0], ax.get_ylim()[0])] + list(zip(x, y)) + [(x[-1], ax.get_ylim()[0])]
+
+    from matplotlib.patches import Polygon
+    from matplotlib.colors import LinearSegmentedColormap
+
+    # Create vertical gradient
+    poly = Polygon(verts, facecolor='none', edgecolor='none')
+    ax.add_patch(poly)
+
+    # Create gradient using imshow
+    y_min, y_max = ax.get_ylim()
+    gradient = np.linspace(0, 1, 256).reshape(-1, 1)
+
+    # Custom colormap: color at top → transparent at bottom
+    colors_rgba = []
+    import matplotlib.colors as mcolors
+    rgb = mcolors.to_rgb(color)
+    for i in range(256):
+        alpha = alpha_top * (1 - i / 255) ** 1.5  # Smooth gradient
+        colors_rgba.append((*rgb, alpha))
+
+    cmap = LinearSegmentedColormap.from_list('gradient', colors_rgba)
+
+    # Fill area under curve
+    ax.fill_between(times, values, y_min, color=color, alpha=0.0)  # Placeholder
+
+    # Manual gradient fill using multiple fills
+    n_strips = 50
+    y_vals = np.array(values)
+    for i in range(n_strips):
+        alpha = alpha_top * (1 - i / n_strips) ** 2
+        strip_height = (y_vals - y_min) * (n_strips - i) / n_strips + y_min
+        strip_height_next = (y_vals - y_min) * (n_strips - i - 1) / n_strips + y_min
+        ax.fill_between(times, strip_height_next, strip_height, color=color, alpha=alpha / n_strips * 3, linewidth=0)
+
+
+def generate_24h_report(
+    data: list[dict],
+    device_name: str,
+    timezone: str = "Europe/Moscow"
+) -> BytesIO:
+    """
+    Generate Apple Stocks-style 24-hour report.
+    Clean dark theme with gradient fills.
+    """
+    if not data:
+        return _generate_empty_chart("Нет данных за последние 24 часа")
+
+    try:
+        tz = ZoneInfo(timezone)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+
+    # Parse all data
+    times = []
+    co2_values = []
+    temp_values = []
+    humidity_values = []
+
+    for d in data:
+        dt = d['timestamp']
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        local_dt = dt.astimezone(tz)
+
+        times.append(local_dt)
+        co2_values.append(d['co2'])
+        temp_values.append(d.get('temperature', 0))
+        humidity_values.append(d.get('humidity', 0))
+
+    # Calculate statistics
+    avg_co2 = sum(co2_values) / len(co2_values)
+    max_co2 = max(co2_values)
+    min_co2 = min(co2_values)
+    current_co2 = co2_values[-1]
+    avg_temp = sum(temp_values) / len(temp_values) if temp_values else 0
+    avg_humidity = sum(humidity_values) / len(humidity_values) if humidity_values else 0
+    temp_min, temp_max = min(temp_values), max(temp_values)
+    hum_min, hum_max = min(humidity_values), max(humidity_values)
+
+    # Time in zones
+    n = len(co2_values)
+    time_excellent = sum(1 for c in co2_values if c < 800) / n * 100
+    time_good = sum(1 for c in co2_values if 800 <= c < 1000) / n * 100
+    time_moderate = sum(1 for c in co2_values if 1000 <= c < 1500) / n * 100
+    time_bad = sum(1 for c in co2_values if c >= 1500) / n * 100
+
+    # Determine quality and main color
+    if avg_co2 < 800:
+        quality_color = COLORS['accent_green']
+    elif avg_co2 < 1000:
+        quality_color = COLORS['accent_yellow']
+    elif avg_co2 < 1500:
+        quality_color = COLORS['accent_orange']
+    else:
+        quality_color = COLORS['accent_red']
+
+    # Change indicator (vs 24h ago or first value)
+    co2_change = current_co2 - co2_values[0]
+    change_sign = '+' if co2_change >= 0 else ''
+    change_color = COLORS['accent_red'] if co2_change > 0 else COLORS['accent_green']
+
+    # === CREATE FIGURE ===
+    fig = plt.figure(figsize=(10, 16), facecolor=COLORS['bg_dark'])
+
+    # Layout: Header, Main Chart, Stats Grid
+    gs = fig.add_gridspec(5, 3, height_ratios=[1.2, 3, 0.8, 1.2, 1.5],
+                          hspace=0.15, wspace=0.25,
+                          left=0.06, right=0.94, top=0.97, bottom=0.03)
+
+    # === HEADER ===
+    ax_header = fig.add_subplot(gs[0, :])
+    ax_header.set_facecolor(COLORS['bg_dark'])
+    ax_header.axis('off')
+
+    # Device name (large, like ticker symbol)
+    ax_header.text(0.0, 0.85, device_name, fontsize=22, fontweight='bold',
+                   color=COLORS['text_primary'], transform=ax_header.transAxes,
+                   family='sans-serif')
+
+    # Current CO2 value (very large, like stock price)
+    ax_header.text(0.0, 0.35, f'{current_co2}', fontsize=48, fontweight='bold',
+                   color=quality_color, transform=ax_header.transAxes)
+
+    # Change indicator
+    ax_header.text(0.22, 0.42, f'{change_sign}{co2_change}', fontsize=18, fontweight='bold',
+                   color=change_color, transform=ax_header.transAxes)
+
+    # Units and period
+    ax_header.text(0.0, 0.05, 'ppm  •  24 часа', fontsize=12,
+                   color=COLORS['text_secondary'], transform=ax_header.transAxes)
+
+    # Date on right
+    ax_header.text(0.98, 0.5, times[-1].strftime('%d.%m.%Y'),
+                   fontsize=14, color=COLORS['text_secondary'],
+                   ha='right', va='center', transform=ax_header.transAxes)
+
+    # === MAIN CO2 CHART ===
+    ax_main = fig.add_subplot(gs[1, :])
+    ax_main.set_facecolor(COLORS['bg_dark'])
+
+    # Remove all spines
+    for spine in ax_main.spines.values():
+        spine.set_visible(False)
+
+    # Minimal grid
+    ax_main.yaxis.grid(True, color=COLORS['grid'], alpha=0.2, linestyle='-', linewidth=0.5)
+    ax_main.xaxis.grid(False)
+    ax_main.tick_params(colors=COLORS['text_secondary'], labelsize=10)
+    ax_main.tick_params(axis='x', length=0)
+    ax_main.tick_params(axis='y', length=0)
+
+    # Set limits before gradient fill
+    y_min = min(350, min_co2 - 30)
+    y_max = max(1600, max_co2 + 50)
+    ax_main.set_ylim(y_min, y_max)
+    ax_main.set_xlim(times[0], times[-1])
+
+    # Get color for each point based on CO2 value
+    segment_colors = [get_co2_color(c) for c in co2_values]
+
+    # Draw multi-color gradient fill (Apple Stocks style)
+    # Each segment gets its own color based on CO2 level
+    n_strips = 60
+    y_arr = np.array(co2_values)
+
+    for seg_idx in range(len(times) - 1):
+        seg_color = segment_colors[seg_idx]
+        seg_times = times[seg_idx:seg_idx + 2]
+        seg_y = y_arr[seg_idx:seg_idx + 2]
+
+        # Draw vertical gradient strips for this segment
+        for i in range(n_strips):
+            frac = i / n_strips
+            alpha = 0.4 * (1 - frac) ** 2.5
+            strip_top = y_min + (seg_y - y_min) * (1 - frac)
+            strip_bot = y_min + (seg_y - y_min) * (1 - (i + 1) / n_strips)
+            ax_main.fill_between(seg_times, strip_bot, strip_top, color=seg_color,
+                                 alpha=alpha, linewidth=0, zorder=1)
+
+    # Main line with multi-color segments (on top)
+    for seg_idx in range(len(times) - 1):
+        seg_color = segment_colors[seg_idx]
+        ax_main.plot(times[seg_idx:seg_idx + 2], co2_values[seg_idx:seg_idx + 2],
+                     color=seg_color, linewidth=2.5, zorder=2, solid_capstyle='round')
+
+    # Subtle threshold lines
+    for thresh in [800, 1000, 1500]:
+        if y_min < thresh < y_max:
+            ax_main.axhline(y=thresh, color=COLORS['grid'], linestyle='--', alpha=0.3, linewidth=0.8)
+
+    # X-axis formatting
+    ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax_main.xaxis.set_major_locator(mdates.HourLocator(interval=4))
+    plt.setp(ax_main.xaxis.get_majorticklabels(), ha='center')
+
+    # Y-axis on right side (like Stocks app)
+    ax_main.yaxis.tick_right()
+    ax_main.yaxis.set_label_position('right')
+
+    # === PERIOD SELECTOR (visual only) ===
+    ax_periods = fig.add_subplot(gs[2, :])
+    ax_periods.set_facecolor(COLORS['bg_dark'])
+    ax_periods.axis('off')
+
+    periods = ['1ч', '6ч', '12ч', '24ч', '7дн', '30дн']
+    for i, period in enumerate(periods):
+        x_pos = 0.08 + i * 0.15
+        is_selected = (period == '24ч')
+
+        if is_selected:
+            circle = mpatches.Circle((x_pos, 0.5), 0.06, transform=ax_periods.transAxes,
+                                     facecolor=COLORS['bg_card'], edgecolor='none')
+            ax_periods.add_patch(circle)
+            color = COLORS['text_primary']
+        else:
+            color = COLORS['text_secondary']
+
+        ax_periods.text(x_pos, 0.5, period, fontsize=11, color=color,
+                        ha='center', va='center', transform=ax_periods.transAxes,
+                        fontweight='bold' if is_selected else 'normal')
+
+    # === STATS CARDS ===
+    stats_data = [
+        ('Средний', f'{avg_co2:.0f}', 'ppm', get_co2_color(int(avg_co2))),
+        ('Максимум', f'{max_co2}', 'ppm', COLORS['accent_red'] if max_co2 > 1000 else COLORS['text_primary']),
+        ('Минимум', f'{min_co2}', 'ppm', COLORS['accent_green'] if min_co2 < 800 else COLORS['text_primary']),
+    ]
+
+    for i, (label, value, unit, color) in enumerate(stats_data):
+        ax = fig.add_subplot(gs[3, i])
+        ax.set_facecolor(COLORS['bg_dark'])
+        ax.axis('off')
+
+        # Card background
+        rect = mpatches.FancyBboxPatch((0.05, 0.05), 0.9, 0.9,
+                                        boxstyle="round,pad=0.02,rounding_size=0.15",
+                                        facecolor=COLORS['bg_card'],
+                                        edgecolor=COLORS['grid'], linewidth=0.5,
+                                        transform=ax.transAxes)
+        ax.add_patch(rect)
+
+        ax.text(0.5, 0.75, label, fontsize=10, color=COLORS['text_secondary'],
+                ha='center', transform=ax.transAxes)
+        ax.text(0.5, 0.4, value, fontsize=28, fontweight='bold', color=color,
+                ha='center', transform=ax.transAxes)
+        ax.text(0.5, 0.15, unit, fontsize=10, color=COLORS['text_secondary'],
+                ha='center', transform=ax.transAxes)
+
+    # === BOTTOM STATS ROW ===
+    ax_bottom = fig.add_subplot(gs[4, :])
+    ax_bottom.set_facecolor(COLORS['bg_dark'])
+    ax_bottom.axis('off')
+
+    # Stats like in Stocks app: two columns
+    left_stats = [
+        ('Температура', f'{avg_temp:.1f}°C'),
+        ('Влажность', f'{avg_humidity:.0f}%'),
+        ('Замеров', f'{len(co2_values)}'),
+    ]
+
+    right_stats = [
+        ('Диапазон T', f'{temp_min:.1f}° – {temp_max:.1f}°'),
+        ('Диапазон H', f'{hum_min:.0f}% – {hum_max:.0f}%'),
+        ('Период', f'{times[0].strftime("%H:%M")} – {times[-1].strftime("%H:%M")}'),
+    ]
+
+    # Draw separator line
+    ax_bottom.axhline(y=0.92, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
+
+    for i, (label, value) in enumerate(left_stats):
+        y_pos = 0.75 - i * 0.28
+        ax_bottom.text(0.02, y_pos, label, fontsize=11, color=COLORS['text_secondary'],
+                       ha='left', transform=ax_bottom.transAxes)
+        ax_bottom.text(0.35, y_pos, value, fontsize=11, color=COLORS['text_primary'],
+                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
+
+    for i, (label, value) in enumerate(right_stats):
+        y_pos = 0.75 - i * 0.28
+        ax_bottom.text(0.52, y_pos, label, fontsize=11, color=COLORS['text_secondary'],
+                       ha='left', transform=ax_bottom.transAxes)
+        ax_bottom.text(0.98, y_pos, value, fontsize=11, color=COLORS['text_primary'],
+                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
+
+    # Quality zones legend at very bottom
+    ax_bottom.axhline(y=0.08, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
+
+    zone_items = [
+        (COLORS['accent_green'], f'{time_excellent:.0f}%'),
+        (COLORS['accent_yellow'], f'{time_good:.0f}%'),
+        (COLORS['accent_orange'], f'{time_moderate:.0f}%'),
+        (COLORS['accent_red'], f'{time_bad:.0f}%'),
+    ]
+
+    for i, (color, pct) in enumerate(zone_items):
+        x_pos = 0.1 + i * 0.23
+        ax_bottom.plot(x_pos - 0.03, 0.0, 'o', color=color, markersize=10, transform=ax_bottom.transAxes)
+        ax_bottom.text(x_pos, 0.0, pct, fontsize=11, color=COLORS['text_primary'],
+                       va='center', transform=ax_bottom.transAxes, fontweight='bold')
+
+    # Save
+    buf = BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                facecolor=COLORS['bg_dark'], edgecolor='none')
+    buf.seek(0)
+    plt.close(fig)
+
+    return buf
+
+
 def _generate_empty_chart(message: str) -> BytesIO:
-    """Generate a simple chart with 'no data' message."""
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.text(0.5, 0.5, message, ha='center', va='center', fontsize=14, color='gray')
+    """Generate Apple-style 'no data' chart."""
+    fig, ax = plt.subplots(figsize=(10, 6), facecolor=COLORS['bg_dark'])
+    ax.set_facecolor(COLORS['bg_dark'])
+    ax.text(0.5, 0.5, message, ha='center', va='center',
+            fontsize=16, color=COLORS['text_secondary'], fontweight='bold')
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis('off')
 
     buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight',
-                facecolor='white', edgecolor='none')
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                facecolor=COLORS['bg_dark'], edgecolor='none')
     buf.seek(0)
     plt.close(fig)
 

@@ -21,7 +21,7 @@ from app.core.database import async_session_maker
 from app.models.device import Device
 from app.models.telemetry import Telemetry
 from app.models.user import User
-from app.services.charts import generate_daily_chart, generate_morning_report, generate_evening_report
+from app.services.charts import generate_morning_report, generate_evening_report, generate_24h_report
 
 
 # Setup logging
@@ -332,82 +332,6 @@ async def cmd_devices(message: Message):
         await message.answer(text, parse_mode="HTML")
 
 
-@router.message(Command("chart"))
-async def cmd_chart(message: Message):
-    """Handle /chart command - generate CO2 chart for last 24 hours."""
-    user_id = message.from_user.id
-
-    async with async_session_maker() as session:
-        # Get user
-        user_result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-        user = user_result.scalar_one_or_none()
-        user_tz = user.timezone if user else "Europe/Moscow"
-
-        # Get user's devices
-        if settings.is_admin(user_id):
-            result = await session.execute(select(Device))
-        else:
-            result = await session.execute(
-                select(Device).where(Device.owner_telegram_id == user_id)
-            )
-
-        devices = result.scalars().all()
-
-        if not devices:
-            await message.answer(
-                "📭 У вас нет привязанных устройств.\n"
-                "Используйте /bind для привязки."
-            )
-            return
-
-        # Get telemetry for last 24 hours
-        since = datetime.utcnow() - timedelta(hours=24)
-
-        for device in devices:
-            telemetry_result = await session.execute(
-                select(Telemetry)
-                .where(and_(
-                    Telemetry.device_id == device.id,
-                    Telemetry.timestamp >= since
-                ))
-                .order_by(Telemetry.timestamp)
-            )
-            telemetry_list = telemetry_result.scalars().all()
-
-            if not telemetry_list:
-                await message.answer(
-                    f"📭 Нет данных за последние 24 часа для <b>{device.name or device.device_uid}</b>",
-                    parse_mode="HTML"
-                )
-                continue
-
-            # Prepare data for chart
-            data = [
-                {
-                    'timestamp': t.timestamp,
-                    'co2': t.co2,
-                    'temperature': t.temperature,
-                    'humidity': t.humidity
-                }
-                for t in telemetry_list
-            ]
-
-            # Generate chart
-            chart_buf = generate_daily_chart(
-                data,
-                device.name or device.device_uid,
-                user_tz
-            )
-
-            # Send chart
-            await message.answer_photo(
-                BufferedInputFile(chart_buf.read(), filename="co2_chart.png"),
-                caption=f"📊 График CO2 за 24 часа — {device.name or device.device_uid}"
-            )
-
-
 @router.message(Command("morning"))
 async def cmd_morning(message: Message):
     """Handle /morning command - generate night/morning report."""
@@ -540,6 +464,76 @@ async def cmd_evening(message: Message):
             await message.answer_photo(
                 BufferedInputFile(chart_buf.read(), filename="evening_report.png"),
                 caption=f"☀️ Дневной отчёт — {device.name or device.device_uid}"
+            )
+
+
+@router.message(Command("report"))
+async def cmd_report(message: Message):
+    """Handle /report command - generate comprehensive 24-hour report."""
+    user_id = message.from_user.id
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        user_tz = user.timezone if user else "Europe/Moscow"
+
+        if settings.is_admin(user_id):
+            result = await session.execute(select(Device))
+        else:
+            result = await session.execute(
+                select(Device).where(Device.owner_telegram_id == user_id)
+            )
+
+        devices = result.scalars().all()
+
+        if not devices:
+            await message.answer(
+                "📭 У вас нет привязанных устройств.\n"
+                "Используйте /bind для привязки."
+            )
+            return
+
+        since = datetime.utcnow() - timedelta(hours=24)
+
+        for device in devices:
+            telemetry_result = await session.execute(
+                select(Telemetry)
+                .where(and_(
+                    Telemetry.device_id == device.id,
+                    Telemetry.timestamp >= since
+                ))
+                .order_by(Telemetry.timestamp)
+            )
+            telemetry_list = telemetry_result.scalars().all()
+
+            if not telemetry_list:
+                await message.answer(
+                    f"📭 Нет данных за последние 24 часа для <b>{device.name or device.device_uid}</b>",
+                    parse_mode="HTML"
+                )
+                continue
+
+            data = [
+                {
+                    'timestamp': t.timestamp,
+                    'co2': t.co2,
+                    'temperature': t.temperature,
+                    'humidity': t.humidity
+                }
+                for t in telemetry_list
+            ]
+
+            chart_buf = generate_24h_report(
+                data,
+                device.name or device.device_uid,
+                user_tz
+            )
+
+            await message.answer_photo(
+                BufferedInputFile(chart_buf.read(), filename="24h_report.png"),
+                caption=f"📊 Отчёт за 24 часа — {device.name or device.device_uid}"
             )
 
 
@@ -766,7 +760,7 @@ async def cmd_help(message: Message):
         "/devices - список устройств\n"
         "/bind - привязать устройство\n\n"
         "<b>Графики и отчёты:</b>\n"
-        "/chart - график за 24 часа\n"
+        "/report - отчёт за 24 часа\n"
         "/morning - ночной отчёт (качество сна)\n"
         "/evening - дневной отчёт\n\n"
         "<b>Настройки:</b>\n"
@@ -959,8 +953,27 @@ async def handle_admin_callback(callback: CallbackQuery, state: FSMContext):
                 )
 
     elif action == "back":
-        # Return to admin panel
-        await cmd_admin(callback.message)
+        # Return to admin panel - rebuild the panel inline
+        async with async_session_maker() as session:
+            devices_result = await session.execute(select(Device))
+            devices = devices_result.scalars().all()
+
+            online_count = sum(1 for d in devices if d.is_online)
+            total_count = len(devices)
+
+            text = (
+                "🔧 <b>Админ-панель</b>\n\n"
+                f"📱 Устройств: {total_count}\n"
+                f"🟢 Online: {online_count}\n"
+                f"🔴 Offline: {total_count - online_count}\n"
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+                [InlineKeyboardButton(text="📱 Управление устройствами", callback_data="admin:devices")],
+            ])
+
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 # ==================== MAIN ====================
