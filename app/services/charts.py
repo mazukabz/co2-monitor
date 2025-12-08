@@ -17,21 +17,22 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional
 from zoneinfo import ZoneInfo
+from scipy.interpolate import make_interp_spline
 
-# Apple-inspired color palette
+# Apple-inspired color palette (pure black like Apple Stocks)
 COLORS = {
-    'bg_dark': '#1C1C1E',        # Dark background
-    'bg_card': '#2C2C2E',        # Card background
+    'bg_dark': '#000000',        # Pure black background
+    'bg_card': '#1C1C1E',        # Card background
     'text_primary': '#FFFFFF',   # Primary text
     'text_secondary': '#8E8E93', # Secondary text
-    'accent_green': '#30D158',   # Excellent - Apple green
+    'accent_green': '#34C759',   # Excellent - Apple green
     'accent_yellow': '#FFD60A',  # Good - Apple yellow
     'accent_orange': '#FF9F0A',  # Moderate - Apple orange
-    'accent_red': '#FF453A',     # Bad - Apple red
+    'accent_red': '#FF3B30',     # Bad - Apple red
     'accent_blue': '#0A84FF',    # Info - Apple blue
     'accent_cyan': '#64D2FF',    # Secondary info
     'accent_purple': '#BF5AF2',  # Highlight
-    'grid': '#3A3A3C',           # Grid lines
+    'grid': '#38383A',           # Grid lines
 }
 
 # CO2 level thresholds and colors (Apple style)
@@ -170,8 +171,8 @@ def generate_morning_report(
     timezone: str = "Europe/Moscow"
 ) -> BytesIO:
     """
-    Generate Apple-style morning report (night data 22:00 - 08:00).
-    Shows sleep quality based on CO2 levels.
+    Generate morning report (night data 22:00 - 08:00).
+    Uses unified generate_period_report with night hour filtering.
     """
     if not data:
         return _generate_empty_chart("Нет ночных данных")
@@ -191,170 +192,19 @@ def generate_morning_report(
         hour = local_dt.hour
 
         if hour >= 22 or hour < 8:
-            night_data.append({**d, 'local_time': local_dt})
+            night_data.append(d)
 
     if not night_data:
         return _generate_empty_chart("Нет данных за ночь (22:00-08:00)")
 
-    times = [d['local_time'] for d in night_data]
-    co2_values = [d['co2'] for d in night_data]
-    temp_values = [d.get('temperature', 0) for d in night_data]
-    humidity_values = [d.get('humidity', 0) for d in night_data]
-
-    # Calculate stats
-    avg_co2 = sum(co2_values) / len(co2_values)
-    max_co2 = max(co2_values)
-    min_co2 = min(co2_values)
-    avg_temp = sum(temp_values) / len(temp_values) if temp_values else 0
-    avg_humidity = sum(humidity_values) / len(humidity_values) if humidity_values else 0
-    time_above_1000 = sum(1 for c in co2_values if c > 1000) / len(co2_values) * 100
-
-    # Sleep quality assessment
-    if avg_co2 < 800 and time_above_1000 < 10:
-        quality = "Отлично"
-        quality_emoji = "🌟"
-        quality_color = COLORS['accent_green']
-    elif avg_co2 < 1000 and time_above_1000 < 30:
-        quality = "Хорошо"
-        quality_emoji = "😊"
-        quality_color = COLORS['accent_yellow']
-    elif avg_co2 < 1200:
-        quality = "Удовлетворительно"
-        quality_emoji = "😐"
-        quality_color = COLORS['accent_orange']
-    else:
-        quality = "Плохо"
-        quality_emoji = "😟"
-        quality_color = COLORS['accent_red']
-
-    # Smooth data for chart
-    chart_times, chart_co2 = _resample_data(times, co2_values, 80)
-    chart_co2 = _smooth_data(chart_co2, 5)
-
-    # === CREATE FIGURE ===
-    fig = plt.figure(figsize=(12, 12), facecolor=COLORS['bg_dark'])
-    gs = fig.add_gridspec(4, 3, height_ratios=[1.0, 2.0, 0.8, 1.0],
-                          hspace=0.2, wspace=0.2,
-                          left=0.05, right=0.95, top=0.95, bottom=0.05)
-
-    # === HEADER ===
-    ax_header = fig.add_subplot(gs[0, :])
-    ax_header.set_facecolor(COLORS['bg_dark'])
-    ax_header.axis('off')
-
-    ax_header.text(0.0, 0.85, f"🌙 Ночной отчёт", fontsize=24, fontweight='bold',
-                   color=COLORS['text_primary'], transform=ax_header.transAxes)
-    ax_header.text(0.0, 0.55, device_name, fontsize=18,
-                   color=COLORS['text_secondary'], transform=ax_header.transAxes)
-
-    # Quality badge
-    ax_header.text(0.0, 0.15, f"Качество сна: {quality} {quality_emoji}", fontsize=20, fontweight='bold',
-                   color=quality_color, transform=ax_header.transAxes)
-
-    ax_header.text(0.98, 0.5, times[-1].strftime('%d.%m.%Y'),
-                   fontsize=16, color=COLORS['text_secondary'],
-                   ha='right', va='center', transform=ax_header.transAxes)
-
-    # === MAIN CHART ===
-    ax_main = fig.add_subplot(gs[1, :])
-    ax_main.set_facecolor(COLORS['bg_dark'])
-    for spine in ax_main.spines.values():
-        spine.set_visible(False)
-
-    ax_main.yaxis.grid(True, color=COLORS['grid'], alpha=0.2, linewidth=0.5)
-    ax_main.xaxis.grid(False)
-    ax_main.tick_params(colors=COLORS['text_secondary'], labelsize=12)
-
-    y_min = min(350, min_co2 - 30)
-    y_max = max(1600, max_co2 + 50)
-    ax_main.set_ylim(y_min, y_max)
-    ax_main.set_xlim(chart_times[0], chart_times[-1])
-
-    # Multi-color gradient fill
-    segment_colors = [get_co2_color(int(c)) for c in chart_co2]
-    n_strips = 40
-    y_arr = np.array(chart_co2)
-
-    for seg_idx in range(len(chart_times) - 1):
-        seg_color = segment_colors[seg_idx]
-        seg_times = chart_times[seg_idx:seg_idx + 2]
-        seg_y = y_arr[seg_idx:seg_idx + 2]
-
-        for i in range(n_strips):
-            frac = i / n_strips
-            alpha = 0.45 * (1 - frac) ** 2.5
-            strip_top = y_min + (seg_y - y_min) * (1 - frac)
-            strip_bot = y_min + (seg_y - y_min) * (1 - (i + 1) / n_strips)
-            ax_main.fill_between(seg_times, strip_bot, strip_top, color=seg_color,
-                                 alpha=alpha, linewidth=0, zorder=1)
-
-    # Main line
-    for seg_idx in range(len(chart_times) - 1):
-        seg_color = segment_colors[seg_idx]
-        ax_main.plot(chart_times[seg_idx:seg_idx + 2], chart_co2[seg_idx:seg_idx + 2],
-                     color=seg_color, linewidth=3, zorder=2, solid_capstyle='round')
-
-    # Threshold lines
-    for thresh in [800, 1000]:
-        if y_min < thresh < y_max:
-            ax_main.axhline(y=thresh, color=COLORS['grid'], linestyle='--', alpha=0.4)
-
-    ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    ax_main.xaxis.set_major_locator(mdates.HourLocator(interval=2))
-    ax_main.yaxis.tick_right()
-
-    # === STATS CARDS ===
-    stats_data = [
-        ('Средний', f'{avg_co2:.0f}', 'ppm', get_co2_color(int(avg_co2))),
-        ('Время >1000', f'{time_above_1000:.0f}', '%', COLORS['accent_orange'] if time_above_1000 > 20 else COLORS['text_primary']),
-        ('Замеров', f'{len(co2_values)}', '', COLORS['text_primary']),
-    ]
-
-    for i, (label, value, unit, color) in enumerate(stats_data):
-        ax = fig.add_subplot(gs[2, i])
-        ax.set_facecolor(COLORS['bg_dark'])
-        ax.axis('off')
-
-        rect = mpatches.FancyBboxPatch((0.05, 0.1), 0.9, 0.8,
-                                        boxstyle="round,pad=0.02,rounding_size=0.15",
-                                        facecolor=COLORS['bg_card'],
-                                        edgecolor=COLORS['grid'], linewidth=0.5,
-                                        transform=ax.transAxes)
-        ax.add_patch(rect)
-
-        ax.text(0.5, 0.78, label, fontsize=13, color=COLORS['text_secondary'],
-                ha='center', transform=ax.transAxes)
-        ax.text(0.5, 0.42, value, fontsize=32, fontweight='bold', color=color,
-                ha='center', transform=ax.transAxes)
-        ax.text(0.5, 0.15, unit, fontsize=13, color=COLORS['text_secondary'],
-                ha='center', transform=ax.transAxes)
-
-    # === BOTTOM STATS ===
-    ax_bottom = fig.add_subplot(gs[3, :])
-    ax_bottom.set_facecolor(COLORS['bg_dark'])
-    ax_bottom.axis('off')
-    ax_bottom.axhline(y=0.9, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
-
-    bottom_stats = [
-        ('🌡️ Температура', f'{avg_temp:.1f}°C'),
-        ('💧 Влажность', f'{avg_humidity:.0f}%'),
-        ('🕐 Период', f'{times[0].strftime("%H:%M")} – {times[-1].strftime("%H:%M")}'),
-    ]
-
-    for i, (label, value) in enumerate(bottom_stats):
-        x_pos = 0.02 + i * 0.33
-        ax_bottom.text(x_pos, 0.5, label, fontsize=14, color=COLORS['text_secondary'],
-                       ha='left', transform=ax_bottom.transAxes)
-        ax_bottom.text(x_pos + 0.28, 0.5, value, fontsize=14, color=COLORS['text_primary'],
-                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
-
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                facecolor=COLORS['bg_dark'], edgecolor='none')
-    buf.seek(0)
-    plt.close(fig)
-
-    return buf
+    return generate_period_report(
+        data=night_data,
+        device_name=device_name,
+        timezone=timezone,
+        period_hours=10,  # ~10 hours night
+        period_label="22:00-08:00",
+        report_type="morning"
+    )
 
 
 def generate_evening_report(
@@ -363,7 +213,8 @@ def generate_evening_report(
     timezone: str = "Europe/Moscow"
 ) -> BytesIO:
     """
-    Generate Apple-style evening report (daytime data 08:00 - 22:00).
+    Generate evening report (daytime data 08:00 - 22:00).
+    Uses unified generate_period_report with day hour filtering.
     """
     if not data:
         return _generate_empty_chart("Нет дневных данных")
@@ -383,191 +234,19 @@ def generate_evening_report(
         hour = local_dt.hour
 
         if 8 <= hour < 22:
-            day_data.append({**d, 'local_time': local_dt})
+            day_data.append(d)
 
     if not day_data:
         return _generate_empty_chart("Нет данных за день (08:00-22:00)")
 
-    times = [d['local_time'] for d in day_data]
-    co2_values = [d['co2'] for d in day_data]
-    temp_values = [d.get('temperature', 0) for d in day_data]
-    humidity_values = [d.get('humidity', 0) for d in day_data]
-
-    # Stats
-    avg_co2 = sum(co2_values) / len(co2_values)
-    max_co2 = max(co2_values)
-    min_co2 = min(co2_values)
-    avg_temp = sum(temp_values) / len(temp_values) if temp_values else 0
-    avg_humidity = sum(humidity_values) / len(humidity_values) if humidity_values else 0
-    temp_min, temp_max = min(temp_values), max(temp_values)
-    hum_min, hum_max = min(humidity_values), max(humidity_values)
-
-    # Time in zones
-    n = len(co2_values)
-    time_excellent = sum(1 for c in co2_values if c < 800) / n * 100
-    time_good = sum(1 for c in co2_values if 800 <= c < 1000) / n * 100
-    time_moderate = sum(1 for c in co2_values if 1000 <= c < 1500) / n * 100
-    time_bad = sum(1 for c in co2_values if c >= 1500) / n * 100
-
-    # Quality color
-    if avg_co2 < 800:
-        quality_color = COLORS['accent_green']
-    elif avg_co2 < 1000:
-        quality_color = COLORS['accent_yellow']
-    elif avg_co2 < 1500:
-        quality_color = COLORS['accent_orange']
-    else:
-        quality_color = COLORS['accent_red']
-
-    # Smooth data
-    chart_times, chart_co2 = _resample_data(times, co2_values, 100)
-    chart_co2 = _smooth_data(chart_co2, 7)
-
-    # === CREATE FIGURE ===
-    fig = plt.figure(figsize=(12, 14), facecolor=COLORS['bg_dark'])
-    gs = fig.add_gridspec(4, 3, height_ratios=[1.0, 2.5, 1.0, 1.2],
-                          hspace=0.2, wspace=0.2,
-                          left=0.05, right=0.95, top=0.95, bottom=0.05)
-
-    # === HEADER ===
-    ax_header = fig.add_subplot(gs[0, :])
-    ax_header.set_facecolor(COLORS['bg_dark'])
-    ax_header.axis('off')
-
-    ax_header.text(0.0, 0.8, f"☀️ Дневной отчёт", fontsize=24, fontweight='bold',
-                   color=COLORS['text_primary'], transform=ax_header.transAxes)
-    ax_header.text(0.0, 0.45, device_name, fontsize=18,
-                   color=COLORS['text_secondary'], transform=ax_header.transAxes)
-    ax_header.text(0.0, 0.1, f"Средний CO2: {avg_co2:.0f} ppm", fontsize=20, fontweight='bold',
-                   color=quality_color, transform=ax_header.transAxes)
-    ax_header.text(0.98, 0.5, times[-1].strftime('%d.%m.%Y'),
-                   fontsize=16, color=COLORS['text_secondary'],
-                   ha='right', va='center', transform=ax_header.transAxes)
-
-    # === MAIN CHART ===
-    ax_main = fig.add_subplot(gs[1, :])
-    ax_main.set_facecolor(COLORS['bg_dark'])
-    for spine in ax_main.spines.values():
-        spine.set_visible(False)
-
-    ax_main.yaxis.grid(True, color=COLORS['grid'], alpha=0.2, linewidth=0.5)
-    ax_main.tick_params(colors=COLORS['text_secondary'], labelsize=12)
-
-    y_min = min(350, min_co2 - 30)
-    y_max = max(1600, max_co2 + 50)
-    ax_main.set_ylim(y_min, y_max)
-    ax_main.set_xlim(chart_times[0], chart_times[-1])
-
-    # Multi-color gradient fill
-    segment_colors = [get_co2_color(int(c)) for c in chart_co2]
-    n_strips = 40
-    y_arr = np.array(chart_co2)
-
-    for seg_idx in range(len(chart_times) - 1):
-        seg_color = segment_colors[seg_idx]
-        seg_times = chart_times[seg_idx:seg_idx + 2]
-        seg_y = y_arr[seg_idx:seg_idx + 2]
-
-        for i in range(n_strips):
-            frac = i / n_strips
-            alpha = 0.45 * (1 - frac) ** 2.5
-            strip_top = y_min + (seg_y - y_min) * (1 - frac)
-            strip_bot = y_min + (seg_y - y_min) * (1 - (i + 1) / n_strips)
-            ax_main.fill_between(seg_times, strip_bot, strip_top, color=seg_color,
-                                 alpha=alpha, linewidth=0, zorder=1)
-
-    for seg_idx in range(len(chart_times) - 1):
-        seg_color = segment_colors[seg_idx]
-        ax_main.plot(chart_times[seg_idx:seg_idx + 2], chart_co2[seg_idx:seg_idx + 2],
-                     color=seg_color, linewidth=3, zorder=2, solid_capstyle='round')
-
-    for thresh in [800, 1000, 1500]:
-        if y_min < thresh < y_max:
-            ax_main.axhline(y=thresh, color=COLORS['grid'], linestyle='--', alpha=0.4)
-
-    ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    ax_main.xaxis.set_major_locator(mdates.HourLocator(interval=2))
-    ax_main.yaxis.tick_right()
-
-    # === STATS CARDS ===
-    stats_data = [
-        ('Средний', f'{avg_co2:.0f}', 'ppm', get_co2_color(int(avg_co2))),
-        ('Максимум', f'{max_co2}', 'ppm', COLORS['accent_red'] if max_co2 > 1000 else COLORS['text_primary']),
-        ('Минимум', f'{min_co2}', 'ppm', COLORS['accent_green'] if min_co2 < 800 else COLORS['text_primary']),
-    ]
-
-    for i, (label, value, unit, color) in enumerate(stats_data):
-        ax = fig.add_subplot(gs[2, i])
-        ax.set_facecolor(COLORS['bg_dark'])
-        ax.axis('off')
-
-        rect = mpatches.FancyBboxPatch((0.05, 0.1), 0.9, 0.8,
-                                        boxstyle="round,pad=0.02,rounding_size=0.15",
-                                        facecolor=COLORS['bg_card'],
-                                        edgecolor=COLORS['grid'], linewidth=0.5,
-                                        transform=ax.transAxes)
-        ax.add_patch(rect)
-
-        ax.text(0.5, 0.78, label, fontsize=14, color=COLORS['text_secondary'],
-                ha='center', transform=ax.transAxes)
-        ax.text(0.5, 0.42, value, fontsize=36, fontweight='bold', color=color,
-                ha='center', transform=ax.transAxes)
-        ax.text(0.5, 0.15, unit, fontsize=14, color=COLORS['text_secondary'],
-                ha='center', transform=ax.transAxes)
-
-    # === BOTTOM STATS ===
-    ax_bottom = fig.add_subplot(gs[3, :])
-    ax_bottom.set_facecolor(COLORS['bg_dark'])
-    ax_bottom.axis('off')
-    ax_bottom.axhline(y=0.95, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
-
-    left_stats = [
-        ('🌡️ Температура', f'{avg_temp:.1f}°C ({temp_min:.1f}° – {temp_max:.1f}°)'),
-        ('💧 Влажность', f'{avg_humidity:.0f}% ({hum_min:.0f}% – {hum_max:.0f}%)'),
-    ]
-
-    right_stats = [
-        ('📊 Замеров', f'{n}'),
-        ('🕐 Период', f'{times[0].strftime("%H:%M")} – {times[-1].strftime("%H:%M")}'),
-    ]
-
-    for i, (label, value) in enumerate(left_stats):
-        y_pos = 0.72 - i * 0.35
-        ax_bottom.text(0.02, y_pos, label, fontsize=15, color=COLORS['text_secondary'],
-                       ha='left', transform=ax_bottom.transAxes)
-        ax_bottom.text(0.45, y_pos, value, fontsize=15, color=COLORS['text_primary'],
-                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
-
-    for i, (label, value) in enumerate(right_stats):
-        y_pos = 0.72 - i * 0.35
-        ax_bottom.text(0.52, y_pos, label, fontsize=15, color=COLORS['text_secondary'],
-                       ha='left', transform=ax_bottom.transAxes)
-        ax_bottom.text(0.98, y_pos, value, fontsize=15, color=COLORS['text_primary'],
-                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
-
-    # Quality zones
-    ax_bottom.axhline(y=0.12, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
-
-    zone_items = [
-        (COLORS['accent_green'], f'<800: {time_excellent:.0f}%'),
-        (COLORS['accent_yellow'], f'800-1000: {time_good:.0f}%'),
-        (COLORS['accent_orange'], f'1000-1500: {time_moderate:.0f}%'),
-        (COLORS['accent_red'], f'>1500: {time_bad:.0f}%'),
-    ]
-
-    for i, (color, text) in enumerate(zone_items):
-        x_pos = 0.05 + i * 0.24
-        ax_bottom.plot(x_pos, 0.02, 'o', color=color, markersize=12, transform=ax_bottom.transAxes)
-        ax_bottom.text(x_pos + 0.025, 0.02, text, fontsize=13, color=COLORS['text_primary'],
-                       va='center', transform=ax_bottom.transAxes, fontweight='bold')
-
-    buf = BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                facecolor=COLORS['bg_dark'], edgecolor='none')
-    buf.seek(0)
-    plt.close(fig)
-
-    return buf
+    return generate_period_report(
+        data=day_data,
+        device_name=device_name,
+        timezone=timezone,
+        period_hours=14,  # ~14 hours day
+        period_label="08:00-22:00",
+        report_type="evening"
+    )
 
 
 def generate_weekly_summary(
@@ -731,6 +410,27 @@ def _smooth_data(values: list, window: int = 5) -> list:
     return smoothed
 
 
+def _spline_smooth(times: list, values: list, num_points: int = 300) -> tuple:
+    """Create smooth spline interpolation for Apple Stocks-style curves."""
+    if len(times) < 4:
+        return times, values
+
+    # Convert datetime to numeric for interpolation
+    x_numeric = np.array([t.timestamp() for t in times])
+    y_numeric = np.array(values)
+
+    try:
+        spline = make_interp_spline(x_numeric, y_numeric, k=3)
+        x_smooth = np.linspace(x_numeric.min(), x_numeric.max(), num_points)
+        y_smooth = spline(x_smooth)
+
+        # Convert back to datetime
+        x_datetime = [datetime.fromtimestamp(t, tz=times[0].tzinfo) for t in x_smooth]
+        return x_datetime, y_smooth.tolist()
+    except Exception:
+        return times, values
+
+
 def _resample_data(times: list, values: list, target_points: int = 100) -> tuple:
     """Resample data to target number of points for smoother visualization."""
     if len(times) <= target_points:
@@ -761,11 +461,12 @@ def generate_period_report(
     device_name: str,
     timezone: str = "Europe/Moscow",
     period_hours: int = 24,
-    period_label: str = "24 часа"
+    period_label: str = "24 часа",
+    report_type: str = "general",  # "general", "morning", "evening"
 ) -> BytesIO:
     """
     Generate Apple Stocks-style report for any period.
-    Clean dark theme with gradient fills and smoothed data.
+    Unified function for all report types with mobile-optimized fonts.
 
     Args:
         data: List of telemetry data points
@@ -773,6 +474,7 @@ def generate_period_report(
         timezone: User's timezone
         period_hours: Period in hours (1, 6, 12, 24, 168 for 7 days, 720 for 30 days)
         period_label: Human-readable period label
+        report_type: Type of report for header styling
     """
     if not data:
         return _generate_empty_chart(f"Нет данных за {period_label}")
@@ -815,129 +517,157 @@ def generate_period_report(
     time_good = sum(1 for c in co2_values if 800 <= c < 1000) / n * 100
     time_moderate = sum(1 for c in co2_values if 1000 <= c < 1500) / n * 100
     time_bad = sum(1 for c in co2_values if c >= 1500) / n * 100
+    time_above_1000 = sum(1 for c in co2_values if c > 1000) / n * 100
 
-    # Determine target points based on period
-    if period_hours <= 1:
-        target_points = min(60, len(times))
-        smooth_window = 3
-    elif period_hours <= 6:
-        target_points = min(80, len(times))
-        smooth_window = 5
-    elif period_hours <= 24:
-        target_points = min(100, len(times))
-        smooth_window = 7
-    elif period_hours <= 168:  # 7 days
-        target_points = min(120, len(times))
-        smooth_window = 11
-    else:  # 30 days
-        target_points = min(150, len(times))
-        smooth_window = 15
-
-    # Resample and smooth data for chart
-    chart_times, chart_co2 = _resample_data(times, co2_values, target_points)
-    chart_co2 = _smooth_data(chart_co2, smooth_window)
-
-    # Determine quality and main color
-    if avg_co2 < 800:
-        quality_color = COLORS['accent_green']
-    elif avg_co2 < 1000:
-        quality_color = COLORS['accent_yellow']
-    elif avg_co2 < 1500:
-        quality_color = COLORS['accent_orange']
-    else:
-        quality_color = COLORS['accent_red']
+    # Quality color based on average
+    quality_color = get_co2_color(int(avg_co2))
 
     # Change indicator
     co2_change = current_co2 - co2_values[0]
     change_sign = '+' if co2_change >= 0 else ''
     change_color = COLORS['accent_red'] if co2_change > 0 else COLORS['accent_green']
 
-    # === CREATE FIGURE ===
-    fig = plt.figure(figsize=(12, 14), facecolor=COLORS['bg_dark'])
+    # Sleep quality for morning report
+    sleep_quality = None
+    if report_type == "morning":
+        if avg_co2 < 800 and time_above_1000 < 10:
+            sleep_quality = ("Отлично", COLORS['accent_green'])
+        elif avg_co2 < 1000 and time_above_1000 < 30:
+            sleep_quality = ("Хорошо", COLORS['accent_yellow'])
+        elif avg_co2 < 1200:
+            sleep_quality = ("Удовлетворительно", COLORS['accent_orange'])
+        else:
+            sleep_quality = ("Плохо", COLORS['accent_red'])
 
-    # Simplified layout: Header, Chart, Stats
-    gs = fig.add_gridspec(4, 3, height_ratios=[1.0, 2.5, 1.0, 1.2],
-                          hspace=0.2, wspace=0.2,
-                          left=0.05, right=0.95, top=0.95, bottom=0.05)
+    # Smooth data with spline interpolation for Apple Stocks-style curves
+    chart_times, chart_co2 = _spline_smooth(times, co2_values, num_points=300)
 
-    # === HEADER ===
-    ax_header = fig.add_subplot(gs[0, :])
+    # === CREATE FIGURE - Apple style proportions ===
+    fig = plt.figure(figsize=(12, 18), facecolor=COLORS['bg_dark'])
+
+    # Layout: Header (big value), Period selector, Chart, Stats, Bottom details
+    gs = fig.add_gridspec(5, 1, height_ratios=[1.5, 0.3, 3.0, 1.2, 1.5],
+                          hspace=0.05,
+                          left=0.06, right=0.94, top=0.95, bottom=0.03)
+
+    # === HEADER - Like Apple Stocks ===
+    ax_header = fig.add_subplot(gs[0])
     ax_header.set_facecolor(COLORS['bg_dark'])
     ax_header.axis('off')
 
-    # Device name
-    ax_header.text(0.0, 0.8, device_name, fontsize=28, fontweight='bold',
-                   color=COLORS['text_primary'], transform=ax_header.transAxes)
+    # Report type title - secondary but readable (24pt for mobile)
+    if report_type == "morning":
+        title = "Ночной отчет"
+    elif report_type == "evening":
+        title = "Дневной отчет"
+    else:
+        title = device_name
+    ax_header.text(0.0, 0.85, title, fontsize=24,
+                   color=COLORS['text_secondary'], transform=ax_header.transAxes,
+                   fontweight='medium')
 
-    # Current CO2 value (large)
-    ax_header.text(0.0, 0.25, f'{current_co2}', fontsize=64, fontweight='bold',
-                   color=quality_color, transform=ax_header.transAxes)
+    # Current CO2 - HUGE, like stock price (96pt for mobile)
+    ax_header.text(0.0, 0.30, f'{current_co2}', fontsize=96, fontweight='bold',
+                   color=COLORS['text_primary'], transform=ax_header.transAxes,
+                   fontfamily='sans-serif')
 
-    # Change indicator
-    ax_header.text(0.28, 0.35, f'{change_sign}{co2_change}', fontsize=24, fontweight='bold',
-                   color=change_color, transform=ax_header.transAxes)
+    # Change indicator next to value (28pt)
+    ax_header.text(0.38, 0.42, f'{change_sign}{co2_change} ppm', fontsize=28,
+                   color=change_color, transform=ax_header.transAxes,
+                   fontweight='semibold')
 
-    # Units and period
-    ax_header.text(0.0, 0.0, f'ppm  •  {period_label}', fontsize=16,
-                   color=COLORS['text_secondary'], transform=ax_header.transAxes)
+    # Sleep quality for morning report
+    if sleep_quality:
+        ax_header.text(0.98, 0.30, f'Качество сна: {sleep_quality[0]}', fontsize=20,
+                       color=sleep_quality[1], transform=ax_header.transAxes,
+                       ha='right', fontweight='bold')
 
-    # Date on right
-    ax_header.text(0.98, 0.5, times[-1].strftime('%d.%m.%Y'),
-                   fontsize=18, color=COLORS['text_secondary'],
-                   ha='right', va='center', transform=ax_header.transAxes)
+    # === PERIOD SELECTOR (visual only) ===
+    ax_period = fig.add_subplot(gs[1])
+    ax_period.set_facecolor(COLORS['bg_dark'])
+    ax_period.axis('off')
 
-    # === MAIN CO2 CHART ===
-    ax_main = fig.add_subplot(gs[1, :])
+    periods = ['1ч', '6ч', '12ч', '24ч', '7д', '30д']
+    period_map = {1: 0, 6: 1, 12: 2, 24: 3, 168: 4, 720: 5}
+    selected = period_map.get(period_hours, 3)
+
+    for i, p in enumerate(periods):
+        x_pos = 0.02 + i * 0.16
+        if i == selected:
+            # Selected - with background pill
+            rect = mpatches.FancyBboxPatch((x_pos - 0.02, 0.15), 0.12, 0.7,
+                                            boxstyle="round,pad=0.01,rounding_size=0.3",
+                                            facecolor=COLORS['bg_card'],
+                                            transform=ax_period.transAxes)
+            ax_period.add_patch(rect)
+            ax_period.text(x_pos + 0.04, 0.5, p, fontsize=20, fontweight='bold',
+                          color=COLORS['text_primary'], ha='center', va='center',
+                          transform=ax_period.transAxes)
+        else:
+            ax_period.text(x_pos + 0.04, 0.5, p, fontsize=20,
+                          color=COLORS['text_secondary'], ha='center', va='center',
+                          transform=ax_period.transAxes)
+
+    # === MAIN CHART - Apple style ===
+    ax_main = fig.add_subplot(gs[2])
     ax_main.set_facecolor(COLORS['bg_dark'])
 
     # Remove all spines
     for spine in ax_main.spines.values():
         spine.set_visible(False)
 
-    # Minimal grid
-    ax_main.yaxis.grid(True, color=COLORS['grid'], alpha=0.2, linestyle='-', linewidth=0.5)
+    # Minimal horizontal grid only
+    ax_main.yaxis.grid(True, color=COLORS['grid'], alpha=0.3, linewidth=0.5)
     ax_main.xaxis.grid(False)
-    ax_main.tick_params(colors=COLORS['text_secondary'], labelsize=14)
-    ax_main.tick_params(axis='x', length=0)
+    ax_main.tick_params(colors=COLORS['text_secondary'], labelsize=18)  # Mobile readable
+    ax_main.tick_params(axis='x', length=0, pad=12)
     ax_main.tick_params(axis='y', length=0)
 
-    # Set limits before gradient fill
-    y_min = min(350, min_co2 - 30)
-    y_max = max(1600, max_co2 + 50)
+    # DYNAMIC Y-axis limits - fit data tightly with small padding
+    data_min = min(chart_co2)
+    data_max = max(chart_co2)
+    data_range = data_max - data_min
+    padding = data_range * 0.15  # 15% padding
+
+    y_min = max(0, data_min - padding)
+    y_max = data_max + padding
+
+    # Round to nice numbers
+    y_min = int(y_min / 50) * 50
+    y_max = int((y_max + 49) / 50) * 50
+
     ax_main.set_ylim(y_min, y_max)
     ax_main.set_xlim(chart_times[0], chart_times[-1])
 
-    # Get color for each point based on smoothed CO2 value
-    segment_colors = [get_co2_color(int(c)) for c in chart_co2]
-
-    # Draw multi-color gradient fill (Apple Stocks style)
-    n_strips = 40
+    # Draw gradient fill - segment by color
     y_arr = np.array(chart_co2)
 
+    # Create gradient fill from bottom
+    n_strips = 50
     for seg_idx in range(len(chart_times) - 1):
-        seg_color = segment_colors[seg_idx]
-        seg_times = chart_times[seg_idx:seg_idx + 2]
+        seg_color = get_co2_color(int(chart_co2[seg_idx]))
+        seg_times = [chart_times[seg_idx], chart_times[seg_idx + 1]]
         seg_y = y_arr[seg_idx:seg_idx + 2]
 
-        # Draw vertical gradient strips for this segment
         for i in range(n_strips):
             frac = i / n_strips
-            alpha = 0.45 * (1 - frac) ** 2.5
+            alpha = 0.4 * (1 - frac) ** 2
             strip_top = y_min + (seg_y - y_min) * (1 - frac)
             strip_bot = y_min + (seg_y - y_min) * (1 - (i + 1) / n_strips)
             ax_main.fill_between(seg_times, strip_bot, strip_top, color=seg_color,
                                  alpha=alpha, linewidth=0, zorder=1)
 
-    # Main line with multi-color segments (thicker, smoother)
+    # Main line - smooth, colored by value
     for seg_idx in range(len(chart_times) - 1):
-        seg_color = segment_colors[seg_idx]
+        seg_color = get_co2_color(int(chart_co2[seg_idx]))
         ax_main.plot(chart_times[seg_idx:seg_idx + 2], chart_co2[seg_idx:seg_idx + 2],
-                     color=seg_color, linewidth=3.5, zorder=2, solid_capstyle='round')
+                     color=seg_color, linewidth=2.5, zorder=2, solid_capstyle='round')
 
-    # Subtle threshold lines with labels
-    for thresh, label in [(800, '800'), (1000, '1000'), (1500, '1500')]:
+    # Threshold lines - very subtle
+    for thresh in [800, 1000]:
         if y_min < thresh < y_max:
-            ax_main.axhline(y=thresh, color=COLORS['grid'], linestyle='--', alpha=0.4, linewidth=1)
+            ax_main.axhline(y=thresh, color=COLORS['grid'], linestyle='--',
+                           alpha=0.4, linewidth=0.8)
 
     # X-axis formatting based on period
     if period_hours <= 1:
@@ -956,74 +686,89 @@ def generate_period_report(
         ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
         ax_main.xaxis.set_major_locator(mdates.DayLocator(interval=5))
 
-    plt.setp(ax_main.xaxis.get_majorticklabels(), ha='center')
-
-    # Y-axis on right side (like Stocks app)
+    # Y-axis on right
     ax_main.yaxis.tick_right()
     ax_main.yaxis.set_label_position('right')
 
-    # === STATS CARDS ===
-    stats_data = [
-        ('Средний', f'{avg_co2:.0f}', 'ppm', get_co2_color(int(avg_co2))),
-        ('Максимум', f'{max_co2}', 'ppm', COLORS['accent_red'] if max_co2 > 1000 else COLORS['text_primary']),
-        ('Минимум', f'{min_co2}', 'ppm', COLORS['accent_green'] if min_co2 < 800 else COLORS['text_primary']),
+    # === STATS CARDS - Clean grid like Apple ===
+    ax_stats = fig.add_subplot(gs[3])
+    ax_stats.set_facecolor(COLORS['bg_dark'])
+    ax_stats.axis('off')
+
+    # Draw separator line
+    ax_stats.axhline(y=0.95, xmin=0.0, xmax=1.0, color=COLORS['grid'], linewidth=0.5)
+
+    # Stats in 3 columns - mobile-optimized font sizes
+    stats = [
+        ('Средний', f'{avg_co2:.0f}', 'ppm'),
+        ('Максимум', f'{max_co2}', 'ppm'),
+        ('Минимум', f'{min_co2}', 'ppm'),
     ]
 
-    for i, (label, value, unit, color) in enumerate(stats_data):
-        ax = fig.add_subplot(gs[2, i])
-        ax.set_facecolor(COLORS['bg_dark'])
-        ax.axis('off')
+    for i, (label, value, unit) in enumerate(stats):
+        x_center = 0.17 + i * 0.33
 
-        # Card background
-        rect = mpatches.FancyBboxPatch((0.05, 0.1), 0.9, 0.8,
-                                        boxstyle="round,pad=0.02,rounding_size=0.15",
-                                        facecolor=COLORS['bg_card'],
-                                        edgecolor=COLORS['grid'], linewidth=0.5,
-                                        transform=ax.transAxes)
-        ax.add_patch(rect)
+        # Label - readable on mobile (18pt)
+        ax_stats.text(x_center, 0.75, label, fontsize=18,
+                     color=COLORS['text_secondary'], ha='center',
+                     transform=ax_stats.transAxes)
 
-        ax.text(0.5, 0.78, label, fontsize=14, color=COLORS['text_secondary'],
-                ha='center', transform=ax.transAxes)
-        ax.text(0.5, 0.42, value, fontsize=36, fontweight='bold', color=color,
-                ha='center', transform=ax.transAxes)
-        ax.text(0.5, 0.15, unit, fontsize=14, color=COLORS['text_secondary'],
-                ha='center', transform=ax.transAxes)
+        # Value - large, colored (48pt for mobile)
+        color = get_co2_color(int(value)) if i == 0 else COLORS['text_primary']
+        if i == 1 and int(value) > 1000:
+            color = COLORS['accent_orange']
+        if i == 2 and int(value) < 800:
+            color = COLORS['accent_green']
 
-    # === BOTTOM STATS ROW ===
-    ax_bottom = fig.add_subplot(gs[3, :])
+        ax_stats.text(x_center, 0.38, value, fontsize=48, fontweight='bold',
+                     color=color, ha='center', transform=ax_stats.transAxes)
+
+        # Unit - readable (16pt)
+        ax_stats.text(x_center, 0.08, unit, fontsize=16,
+                     color=COLORS['text_secondary'], ha='center',
+                     transform=ax_stats.transAxes)
+
+    # === BOTTOM DETAILS ===
+    ax_bottom = fig.add_subplot(gs[4])
     ax_bottom.set_facecolor(COLORS['bg_dark'])
     ax_bottom.axis('off')
 
-    # Draw separator line
-    ax_bottom.axhline(y=0.95, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
+    # Separator
+    ax_bottom.axhline(y=0.92, xmin=0.0, xmax=1.0, color=COLORS['grid'], linewidth=0.5)
 
-    # Stats in two columns with larger fonts
-    left_stats = [
-        ('🌡️ Температура', f'{avg_temp:.1f}°C ({temp_min:.1f}° – {temp_max:.1f}°)'),
-        ('💧 Влажность', f'{avg_humidity:.0f}% ({hum_min:.0f}% – {hum_max:.0f}%)'),
+    # Two-column layout like Apple - mobile readable fonts (18-20pt)
+    left_items = [
+        ('Температура', f'{avg_temp:.1f}C'),
+        ('Влажность', f'{avg_humidity:.0f}%'),
+        ('Замеров', f'{n}'),
     ]
 
-    right_stats = [
-        ('📊 Замеров', f'{n}'),
-        ('🕐 Период', f'{times[0].strftime("%d.%m %H:%M")} – {times[-1].strftime("%H:%M")}'),
+    right_items = [
+        ('Мин. темп.', f'{temp_min:.1f}C'),
+        ('Макс. темп.', f'{temp_max:.1f}C'),
+        ('Период', period_label),
     ]
 
-    for i, (label, value) in enumerate(left_stats):
-        y_pos = 0.72 - i * 0.35
-        ax_bottom.text(0.02, y_pos, label, fontsize=15, color=COLORS['text_secondary'],
-                       ha='left', transform=ax_bottom.transAxes)
-        ax_bottom.text(0.45, y_pos, value, fontsize=15, color=COLORS['text_primary'],
-                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
+    for i, (label, value) in enumerate(left_items):
+        y_pos = 0.75 - i * 0.26
+        ax_bottom.text(0.02, y_pos, label, fontsize=18,
+                      color=COLORS['text_secondary'], ha='left',
+                      transform=ax_bottom.transAxes)
+        ax_bottom.text(0.45, y_pos, value, fontsize=20, fontweight='semibold',
+                      color=COLORS['text_primary'], ha='right',
+                      transform=ax_bottom.transAxes)
 
-    for i, (label, value) in enumerate(right_stats):
-        y_pos = 0.72 - i * 0.35
-        ax_bottom.text(0.52, y_pos, label, fontsize=15, color=COLORS['text_secondary'],
-                       ha='left', transform=ax_bottom.transAxes)
-        ax_bottom.text(0.98, y_pos, value, fontsize=15, color=COLORS['text_primary'],
-                       ha='right', transform=ax_bottom.transAxes, fontweight='bold')
+    for i, (label, value) in enumerate(right_items):
+        y_pos = 0.75 - i * 0.26
+        ax_bottom.text(0.52, y_pos, label, fontsize=18,
+                      color=COLORS['text_secondary'], ha='left',
+                      transform=ax_bottom.transAxes)
+        ax_bottom.text(0.98, y_pos, value, fontsize=20, fontweight='semibold',
+                      color=COLORS['text_primary'], ha='right',
+                      transform=ax_bottom.transAxes)
 
-    # Quality zones legend at bottom
-    ax_bottom.axhline(y=0.12, xmin=0.02, xmax=0.98, color=COLORS['grid'], linewidth=0.5)
+    # Zone legend at very bottom
+    ax_bottom.axhline(y=0.08, xmin=0.0, xmax=1.0, color=COLORS['grid'], linewidth=0.5)
 
     zone_items = [
         (COLORS['accent_green'], f'<800: {time_excellent:.0f}%'),
@@ -1033,10 +778,12 @@ def generate_period_report(
     ]
 
     for i, (color, text) in enumerate(zone_items):
-        x_pos = 0.05 + i * 0.24
-        ax_bottom.plot(x_pos, 0.02, 'o', color=color, markersize=12, transform=ax_bottom.transAxes)
-        ax_bottom.text(x_pos + 0.025, 0.02, text, fontsize=13, color=COLORS['text_primary'],
-                       va='center', transform=ax_bottom.transAxes, fontweight='bold')
+        x_pos = 0.03 + i * 0.24
+        ax_bottom.plot(x_pos, 0.0, 's', color=color, markersize=12,
+                      transform=ax_bottom.transAxes)
+        ax_bottom.text(x_pos + 0.03, 0.0, text, fontsize=16,
+                      color=COLORS['text_primary'], va='center',
+                      transform=ax_bottom.transAxes, fontweight='medium')
 
     # Save
     buf = BytesIO()

@@ -338,6 +338,9 @@ async def cmd_morning(message: Message):
     """Handle /morning command - generate night/morning report."""
     user_id = message.from_user.id
 
+    # Show typing indicator while generating chart
+    await message.bot.send_chat_action(message.chat.id, "upload_photo")
+
     async with async_session_maker() as session:
         user_result = await session.execute(
             select(User).where(User.telegram_id == user_id)
@@ -405,6 +408,9 @@ async def cmd_morning(message: Message):
 async def cmd_evening(message: Message):
     """Handle /evening command - generate day/evening report."""
     user_id = message.from_user.id
+
+    # Show typing indicator while generating chart
+    await message.bot.send_chat_action(message.chat.id, "upload_photo")
 
     async with async_session_maker() as session:
         user_result = await session.execute(
@@ -535,6 +541,9 @@ async def callback_report_period(callback: CallbackQuery):
         )
     except Exception:
         pass
+
+    # Show typing indicator while generating chart
+    await callback.bot.send_chat_action(callback.message.chat.id, "upload_photo")
 
     async with async_session_maker() as session:
         user_result = await session.execute(
