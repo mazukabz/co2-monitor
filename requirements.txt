@@ -18,3 +18,7 @@ pydantic-settings==2.1.0
 
 # Utilities
 python-dotenv==1.0.0
+
+# Charts & Infographics
+matplotlib==3.8.2
+seaborn==0.13.1

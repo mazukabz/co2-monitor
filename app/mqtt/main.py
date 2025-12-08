@@ -28,16 +28,55 @@ def generate_activation_code() -> str:
     return "".join(random.choices(chars, k=8))
 
 
+# Global reference to MQTT client for config push
+_mqtt_client: mqtt.Client | None = None
+
+
+def get_mqtt_client() -> mqtt.Client | None:
+    """Get the global MQTT client instance."""
+    return _mqtt_client
+
+
+def publish_device_config(device_uid: str, config: dict) -> bool:
+    """
+    Publish configuration to a device.
+
+    Args:
+        device_uid: Device unique identifier
+        config: Configuration dict (e.g., {"send_interval": 60})
+
+    Returns:
+        True if published successfully
+    """
+    client = get_mqtt_client()
+    if not client or not client.is_connected():
+        print(f"⚠️ MQTT client not connected, cannot push config to {device_uid}")
+        return False
+
+    topic = f"devices/{device_uid}/config"
+    payload = json.dumps(config)
+
+    result = client.publish(topic, payload, qos=1, retain=True)
+    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+        print(f"📤 Config pushed to {device_uid}: {config}")
+        return True
+    else:
+        print(f"❌ Failed to push config to {device_uid}: {result.rc}")
+        return False
+
+
 class MQTTProcessor:
     """Processes MQTT messages from CO2 devices."""
 
     def __init__(self):
+        global _mqtt_client
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.client.on_disconnect = self._on_disconnect
         self.running = False
         self._loop = None
+        _mqtt_client = self.client
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         """Called when connected to MQTT broker."""

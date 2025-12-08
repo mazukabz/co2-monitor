@@ -2,8 +2,8 @@
 User model - represents a Telegram user
 """
 
-from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, BigInteger
+from datetime import datetime, time
+from sqlalchemy import String, Boolean, DateTime, BigInteger, Time, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -24,6 +24,21 @@ class User(Base):
 
     # User's timezone (default Moscow)
     timezone: Mapped[str] = mapped_column(String(50), default="Europe/Moscow")
+
+    # Notification settings
+    alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    alert_threshold: Mapped[int] = mapped_column(Integer, default=1000)  # CO2 ppm
+
+    # Morning report settings (night summary)
+    morning_report_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    morning_report_time: Mapped[time] = mapped_column(Time, default=time(8, 0))
+
+    # Evening report settings (day summary)
+    evening_report_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    evening_report_time: Mapped[time] = mapped_column(Time, default=time(22, 0))
+
+    # Hourly snapshots (every N hours, 0 = disabled)
+    snapshot_interval_hours: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

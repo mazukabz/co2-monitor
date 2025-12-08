@@ -227,7 +227,11 @@ class CO2Device:
 
     def _apply_config(self, config: dict):
         """Apply new configuration."""
-        if "report_interval" in config:
+        # Support both 'send_interval' (new) and 'report_interval' (legacy)
+        if "send_interval" in config:
+            self.config["report_interval"] = config["send_interval"]
+            print(f"⚙️ Send interval updated to {self.config['report_interval']}s")
+        elif "report_interval" in config:
             self.config["report_interval"] = config["report_interval"]
             print(f"⚙️ Report interval set to {self.config['report_interval']}s")
 
@@ -273,7 +277,7 @@ class CO2Device:
             "temperature": data["temperature"],
             "humidity": data["humidity"],
             "ip": self._get_ip(),
-            "firmware_version": "1.2.0",
+            "firmware_version": "1.2.1",
             "uptime": int(time.time() - self.start_time)
         }
 

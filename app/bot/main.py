@@ -5,21 +5,23 @@ Provides user interface for monitoring CO2 levels
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, time
 
 from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import BufferedInputFile
 from zoneinfo import ZoneInfo
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, and_
 
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.device import Device
 from app.models.telemetry import Telemetry
 from app.models.user import User
+from app.services.charts import generate_daily_chart, generate_morning_report, generate_evening_report
 
 
 # Setup logging
@@ -35,6 +37,14 @@ router = Router()
 class BindDevice(StatesGroup):
     """States for device binding flow."""
     waiting_for_code = State()
+
+
+class SettingsFlow(StatesGroup):
+    """States for settings configuration."""
+    waiting_for_threshold = State()
+    waiting_for_morning_time = State()
+    waiting_for_evening_time = State()
+    waiting_for_interval = State()
 
 
 # ==================== HELPERS ====================
@@ -322,17 +332,445 @@ async def cmd_devices(message: Message):
         await message.answer(text, parse_mode="HTML")
 
 
+@router.message(Command("chart"))
+async def cmd_chart(message: Message):
+    """Handle /chart command - generate CO2 chart for last 24 hours."""
+    user_id = message.from_user.id
+
+    async with async_session_maker() as session:
+        # Get user
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        user_tz = user.timezone if user else "Europe/Moscow"
+
+        # Get user's devices
+        if settings.is_admin(user_id):
+            result = await session.execute(select(Device))
+        else:
+            result = await session.execute(
+                select(Device).where(Device.owner_telegram_id == user_id)
+            )
+
+        devices = result.scalars().all()
+
+        if not devices:
+            await message.answer(
+                "📭 У вас нет привязанных устройств.\n"
+                "Используйте /bind для привязки."
+            )
+            return
+
+        # Get telemetry for last 24 hours
+        since = datetime.utcnow() - timedelta(hours=24)
+
+        for device in devices:
+            telemetry_result = await session.execute(
+                select(Telemetry)
+                .where(and_(
+                    Telemetry.device_id == device.id,
+                    Telemetry.timestamp >= since
+                ))
+                .order_by(Telemetry.timestamp)
+            )
+            telemetry_list = telemetry_result.scalars().all()
+
+            if not telemetry_list:
+                await message.answer(
+                    f"📭 Нет данных за последние 24 часа для <b>{device.name or device.device_uid}</b>",
+                    parse_mode="HTML"
+                )
+                continue
+
+            # Prepare data for chart
+            data = [
+                {
+                    'timestamp': t.timestamp,
+                    'co2': t.co2,
+                    'temperature': t.temperature,
+                    'humidity': t.humidity
+                }
+                for t in telemetry_list
+            ]
+
+            # Generate chart
+            chart_buf = generate_daily_chart(
+                data,
+                device.name or device.device_uid,
+                user_tz
+            )
+
+            # Send chart
+            await message.answer_photo(
+                BufferedInputFile(chart_buf.read(), filename="co2_chart.png"),
+                caption=f"📊 График CO2 за 24 часа — {device.name or device.device_uid}"
+            )
+
+
+@router.message(Command("morning"))
+async def cmd_morning(message: Message):
+    """Handle /morning command - generate night/morning report."""
+    user_id = message.from_user.id
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        user_tz = user.timezone if user else "Europe/Moscow"
+
+        if settings.is_admin(user_id):
+            result = await session.execute(select(Device))
+        else:
+            result = await session.execute(
+                select(Device).where(Device.owner_telegram_id == user_id)
+            )
+
+        devices = result.scalars().all()
+
+        if not devices:
+            await message.answer("📭 Нет привязанных устройств.")
+            return
+
+        # Get telemetry for last 24 hours (to cover night period)
+        since = datetime.utcnow() - timedelta(hours=24)
+
+        for device in devices:
+            telemetry_result = await session.execute(
+                select(Telemetry)
+                .where(and_(
+                    Telemetry.device_id == device.id,
+                    Telemetry.timestamp >= since
+                ))
+                .order_by(Telemetry.timestamp)
+            )
+            telemetry_list = telemetry_result.scalars().all()
+
+            if not telemetry_list:
+                await message.answer(
+                    f"📭 Нет ночных данных для <b>{device.name or device.device_uid}</b>",
+                    parse_mode="HTML"
+                )
+                continue
+
+            data = [
+                {
+                    'timestamp': t.timestamp,
+                    'co2': t.co2,
+                    'temperature': t.temperature,
+                    'humidity': t.humidity
+                }
+                for t in telemetry_list
+            ]
+
+            chart_buf = generate_morning_report(
+                data,
+                device.name or device.device_uid,
+                user_tz
+            )
+
+            await message.answer_photo(
+                BufferedInputFile(chart_buf.read(), filename="morning_report.png"),
+                caption=f"🌙 Ночной отчёт — {device.name or device.device_uid}"
+            )
+
+
+@router.message(Command("evening"))
+async def cmd_evening(message: Message):
+    """Handle /evening command - generate day/evening report."""
+    user_id = message.from_user.id
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        user_tz = user.timezone if user else "Europe/Moscow"
+
+        if settings.is_admin(user_id):
+            result = await session.execute(select(Device))
+        else:
+            result = await session.execute(
+                select(Device).where(Device.owner_telegram_id == user_id)
+            )
+
+        devices = result.scalars().all()
+
+        if not devices:
+            await message.answer("📭 Нет привязанных устройств.")
+            return
+
+        since = datetime.utcnow() - timedelta(hours=24)
+
+        for device in devices:
+            telemetry_result = await session.execute(
+                select(Telemetry)
+                .where(and_(
+                    Telemetry.device_id == device.id,
+                    Telemetry.timestamp >= since
+                ))
+                .order_by(Telemetry.timestamp)
+            )
+            telemetry_list = telemetry_result.scalars().all()
+
+            if not telemetry_list:
+                await message.answer(
+                    f"📭 Нет дневных данных для <b>{device.name or device.device_uid}</b>",
+                    parse_mode="HTML"
+                )
+                continue
+
+            data = [
+                {
+                    'timestamp': t.timestamp,
+                    'co2': t.co2,
+                    'temperature': t.temperature,
+                    'humidity': t.humidity
+                }
+                for t in telemetry_list
+            ]
+
+            chart_buf = generate_evening_report(
+                data,
+                device.name or device.device_uid,
+                user_tz
+            )
+
+            await message.answer_photo(
+                BufferedInputFile(chart_buf.read(), filename="evening_report.png"),
+                caption=f"☀️ Дневной отчёт — {device.name or device.device_uid}"
+            )
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message):
+    """Handle /settings command - show and configure user settings."""
+    user_id = message.from_user.id
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            await message.answer("Сначала используйте /start")
+            return
+
+        # Format current settings
+        morning_status = "✅" if user.morning_report_enabled else "❌"
+        evening_status = "✅" if user.evening_report_enabled else "❌"
+        alerts_status = "✅" if user.alerts_enabled else "❌"
+
+        text = (
+            "⚙️ <b>Настройки уведомлений</b>\n\n"
+            f"🔔 Оповещения: {alerts_status}\n"
+            f"   Порог CO2: {user.alert_threshold} ppm\n\n"
+            f"🌅 Утренний отчёт: {morning_status}\n"
+            f"   Время: {user.morning_report_time.strftime('%H:%M')}\n\n"
+            f"🌆 Вечерний отчёт: {evening_status}\n"
+            f"   Время: {user.evening_report_time.strftime('%H:%M')}\n\n"
+            f"🕐 Часовой пояс: {user.timezone}\n"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🔔 Оповещения: {'ВКЛ' if user.alerts_enabled else 'ВЫКЛ'}",
+                    callback_data="settings:toggle_alerts"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 Порог CO2",
+                    callback_data="settings:threshold"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🌅 Утренний: {'ВКЛ' if user.morning_report_enabled else 'ВЫКЛ'}",
+                    callback_data="settings:toggle_morning"
+                ),
+                InlineKeyboardButton(
+                    text="⏰",
+                    callback_data="settings:morning_time"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🌆 Вечерний: {'ВКЛ' if user.evening_report_enabled else 'ВЫКЛ'}",
+                    callback_data="settings:toggle_evening"
+                ),
+                InlineKeyboardButton(
+                    text="⏰",
+                    callback_data="settings:evening_time"
+                )
+            ],
+        ])
+
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("settings:"))
+async def handle_settings_callback(callback: CallbackQuery, state: FSMContext):
+    """Handle settings callbacks."""
+    user_id = callback.from_user.id
+    action = callback.data.split(":")[1]
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            await callback.answer("Ошибка", show_alert=True)
+            return
+
+        if action == "toggle_alerts":
+            user.alerts_enabled = not user.alerts_enabled
+            await session.commit()
+            await callback.answer(f"Оповещения {'включены' if user.alerts_enabled else 'выключены'}")
+
+        elif action == "toggle_morning":
+            user.morning_report_enabled = not user.morning_report_enabled
+            await session.commit()
+            await callback.answer(f"Утренний отчёт {'включён' if user.morning_report_enabled else 'выключён'}")
+
+        elif action == "toggle_evening":
+            user.evening_report_enabled = not user.evening_report_enabled
+            await session.commit()
+            await callback.answer(f"Вечерний отчёт {'включён' if user.evening_report_enabled else 'выключён'}")
+
+        elif action == "threshold":
+            await callback.answer()
+            await callback.message.answer(
+                "📊 Введите порог CO2 для оповещений (ppm):\n"
+                "Например: <code>1000</code> или <code>800</code>\n\n"
+                "/cancel для отмены",
+                parse_mode="HTML"
+            )
+            await state.set_state(SettingsFlow.waiting_for_threshold)
+            return
+
+        elif action == "morning_time":
+            await callback.answer()
+            await callback.message.answer(
+                "🌅 Введите время утреннего отчёта (ЧЧ:ММ):\n"
+                "Например: <code>08:00</code> или <code>07:30</code>\n\n"
+                "/cancel для отмены",
+                parse_mode="HTML"
+            )
+            await state.set_state(SettingsFlow.waiting_for_morning_time)
+            return
+
+        elif action == "evening_time":
+            await callback.answer()
+            await callback.message.answer(
+                "🌆 Введите время вечернего отчёта (ЧЧ:ММ):\n"
+                "Например: <code>22:00</code> или <code>21:30</code>\n\n"
+                "/cancel для отмены",
+                parse_mode="HTML"
+            )
+            await state.set_state(SettingsFlow.waiting_for_evening_time)
+            return
+
+    # Refresh settings view
+    await cmd_settings(callback.message)
+
+
+@router.message(SettingsFlow.waiting_for_threshold)
+async def process_threshold(message: Message, state: FSMContext):
+    """Process threshold input."""
+    try:
+        threshold = int(message.text.strip())
+        if threshold < 400 or threshold > 5000:
+            await message.answer("⚠️ Порог должен быть от 400 до 5000 ppm. Попробуйте снова.")
+            return
+    except ValueError:
+        await message.answer("⚠️ Введите число. Попробуйте снова.")
+        return
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = user_result.scalar_one_or_none()
+        if user:
+            user.alert_threshold = threshold
+            await session.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Порог оповещений установлен: {threshold} ppm")
+
+
+@router.message(SettingsFlow.waiting_for_morning_time)
+async def process_morning_time(message: Message, state: FSMContext):
+    """Process morning time input."""
+    try:
+        parts = message.text.strip().split(":")
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        new_time = time(hour, minute)
+    except (ValueError, IndexError):
+        await message.answer("⚠️ Неверный формат. Введите время как ЧЧ:ММ")
+        return
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = user_result.scalar_one_or_none()
+        if user:
+            user.morning_report_time = new_time
+            await session.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Время утреннего отчёта: {new_time.strftime('%H:%M')}")
+
+
+@router.message(SettingsFlow.waiting_for_evening_time)
+async def process_evening_time(message: Message, state: FSMContext):
+    """Process evening time input."""
+    try:
+        parts = message.text.strip().split(":")
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        new_time = time(hour, minute)
+    except (ValueError, IndexError):
+        await message.answer("⚠️ Неверный формат. Введите время как ЧЧ:ММ")
+        return
+
+    async with async_session_maker() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = user_result.scalar_one_or_none()
+        if user:
+            user.evening_report_time = new_time
+            await session.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Время вечернего отчёта: {new_time.strftime('%H:%M')}")
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Handle /help command."""
     text = (
         "📖 <b>Справка CO2 Monitor</b>\n\n"
-        "<b>Команды:</b>\n"
+        "<b>Основные команды:</b>\n"
         "/start - начало работы\n"
         "/status - текущие показания CO2\n"
         "/devices - список устройств\n"
-        "/bind - привязать устройство\n"
-        "/help - эта справка\n\n"
+        "/bind - привязать устройство\n\n"
+        "<b>Графики и отчёты:</b>\n"
+        "/chart - график за 24 часа\n"
+        "/morning - ночной отчёт (качество сна)\n"
+        "/evening - дневной отчёт\n\n"
+        "<b>Настройки:</b>\n"
+        "/settings - настройки уведомлений\n\n"
         "<b>Уровни CO2:</b>\n"
         "🟢 &lt; 800 ppm - Отлично\n"
         "🟡 800-1000 ppm - Хорошо\n"
@@ -368,14 +806,14 @@ async def cmd_admin(message: Message):
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-            [InlineKeyboardButton(text="📱 Все устройства", callback_data="admin:devices")],
+            [InlineKeyboardButton(text="📱 Управление устройствами", callback_data="admin:devices")],
         ])
 
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("admin:"))
-async def handle_admin_callback(callback: CallbackQuery):
+async def handle_admin_callback(callback: CallbackQuery, state: FSMContext):
     """Handle admin panel callbacks."""
     user_id = callback.from_user.id
 
@@ -384,7 +822,8 @@ async def handle_admin_callback(callback: CallbackQuery):
         return
 
     await callback.answer()
-    action = callback.data.split(":")[1]
+    parts = callback.data.split(":")
+    action = parts[1]
 
     if action == "stats":
         # Show detailed stats
@@ -414,6 +853,111 @@ async def handle_admin_callback(callback: CallbackQuery):
 
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
+    elif action == "devices":
+        # Show device list with management options
+        async with async_session_maker() as session:
+            devices_result = await session.execute(select(Device))
+            devices = devices_result.scalars().all()
+
+            if not devices:
+                await callback.message.edit_text("📭 Нет устройств")
+                return
+
+            text = "📱 <b>Управление устройствами</b>\n\n"
+
+            buttons = []
+            for device in devices:
+                status = "🟢" if device.is_online else "🔴"
+                name = device.name or device.device_uid
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"{status} {name} ({device.send_interval}с)",
+                        callback_data=f"admin:device:{device.id}"
+                    )
+                ])
+
+            buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:back")])
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "device":
+        # Show single device management
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.edit_text("❌ Устройство не найдено")
+                return
+
+            status = "🟢 Online" if device.is_online else "🔴 Offline"
+            text = (
+                f"📱 <b>{device.name or device.device_uid}</b>\n\n"
+                f"UID: <code>{device.device_uid}</code>\n"
+                f"Статус: {status}\n"
+                f"Код активации: <code>{device.activation_code}</code>\n"
+                f"Интервал отправки: {device.send_interval} сек\n"
+                f"Прошивка: {device.firmware_version or '—'}\n"
+                f"IP: {device.last_ip or '—'}\n"
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="⏱ 30 сек", callback_data=f"admin:interval:{device_id}:30"),
+                    InlineKeyboardButton(text="⏱ 60 сек", callback_data=f"admin:interval:{device_id}:60"),
+                ],
+                [
+                    InlineKeyboardButton(text="⏱ 120 сек", callback_data=f"admin:interval:{device_id}:120"),
+                    InlineKeyboardButton(text="⏱ 300 сек", callback_data=f"admin:interval:{device_id}:300"),
+                ],
+                [InlineKeyboardButton(text="◀️ К списку", callback_data="admin:devices")],
+            ])
+
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    elif action == "interval":
+        # Set device send interval
+        device_id = int(parts[2])
+        interval = int(parts[3])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            # Update in database
+            device.send_interval = interval
+            await session.commit()
+
+            # Push config via MQTT
+            from app.mqtt.main import publish_device_config
+            success = publish_device_config(device.device_uid, {"send_interval": interval})
+
+            if success:
+                await callback.message.answer(
+                    f"✅ Интервал для <b>{device.name or device.device_uid}</b> "
+                    f"установлен: {interval} сек\n\n"
+                    f"Конфигурация отправлена на устройство.",
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.message.answer(
+                    f"⚠️ Интервал сохранён в БД ({interval} сек), "
+                    f"но не удалось отправить на устройство.\n"
+                    f"Устройство получит настройки при следующем подключении.",
+                    parse_mode="HTML"
+                )
+
     elif action == "back":
         # Return to admin panel
         await cmd_admin(callback.message)
@@ -435,11 +979,21 @@ async def main():
     # Register handlers
     dp.include_router(router)
 
+    # Import scheduler here to avoid circular imports
+    from app.services.scheduler import ReportScheduler
+
+    # Start scheduler as background task
+    scheduler = ReportScheduler(bot)
+    scheduler_task = asyncio.create_task(scheduler.start())
+
     logger.info("📡 Bot is running...")
+    logger.info("📅 Scheduler is running...")
 
     try:
         await dp.start_polling(bot)
     finally:
+        scheduler.stop()
+        scheduler_task.cancel()
         await bot.session.close()
 
 
