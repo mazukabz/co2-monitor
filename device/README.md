@@ -34,6 +34,18 @@ After installation, edit `~/co2-monitor/config.json` or set environment variable
 | `SEND_INTERVAL` | 60 | Seconds between readings |
 | `DEMO_MODE` | false | Use fake sensor data |
 
+### Remote Configuration via MQTT
+
+The device subscribes to `devices/{DEVICE_UID}/config` topic and automatically applies settings:
+
+```json
+{"send_interval": 30}
+```
+
+Admin can change interval via Telegram bot: `/admin` → Управление устройствами → выбрать устройство → выбрать интервал.
+
+Settings are pushed immediately via MQTT and also saved in database (applied on next connect if device was offline).
+
 ## Hardware Setup
 
 ### Supported Sensors
