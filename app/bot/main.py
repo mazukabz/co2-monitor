@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # Router for handlers
 router = Router()
 
+# Active live sessions: {chat_id: {"task": asyncio.Task, "end_time": datetime}}
+active_live_sessions: dict[int, dict] = {}
+
 
 # ==================== CONSTANTS ====================
 
@@ -110,6 +113,24 @@ def get_report_period_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def get_live_duration_keyboard() -> InlineKeyboardMarkup:
+    """Get inline keyboard for live mode duration selection."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="5 мин", callback_data="live:5"),
+            InlineKeyboardButton(text="30 мин", callback_data="live:30"),
+            InlineKeyboardButton(text="1 час", callback_data="live:60"),
+        ],
+    ])
+
+
+def get_live_stop_keyboard() -> InlineKeyboardMarkup:
+    """Get inline keyboard to stop live mode."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏹ Остановить", callback_data="live:stop")],
+    ])
+
+
 # ==================== HELPERS ====================
 
 async def get_or_create_user(telegram_user) -> User:
@@ -178,6 +199,51 @@ def format_datetime(dt: datetime, tz_name: str = "Europe/Moscow") -> str:
     return local_dt.strftime("%d.%m %H:%M")
 
 
+def format_time_ago(dt: datetime) -> str:
+    """Format time ago string (e.g. '5 мин назад')."""
+    if dt is None:
+        return "—"
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    diff = now - dt
+
+    seconds = int(diff.total_seconds())
+    if seconds < 60:
+        return f"{seconds} сек назад"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        return f"{minutes} мин назад"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        return f"{hours} ч назад"
+    else:
+        days = seconds // 86400
+        return f"{days} дн назад"
+
+
+def is_device_online(device: Device) -> bool:
+    """Check if device is online based on last_seen and send_interval.
+
+    Device is considered offline if it missed 3 consecutive sends.
+    """
+    if device.last_seen is None:
+        return False
+
+    if device.last_seen.tzinfo is None:
+        last_seen = device.last_seen.replace(tzinfo=timezone.utc)
+    else:
+        last_seen = device.last_seen
+
+    now = datetime.now(timezone.utc)
+    # Timeout = 3 * send_interval (device missed 3 sends)
+    timeout_seconds = device.send_interval * 3
+
+    return (now - last_seen).total_seconds() < timeout_seconds
+
+
 async def setup_bot_commands(bot: Bot):
     """Setup bot commands menu for all users and admins."""
     # Default commands for all users
@@ -185,6 +251,7 @@ async def setup_bot_commands(bot: Bot):
         BotCommand(command="start", description="🚀 Начать работу"),
         BotCommand(command="status", description="📊 Текущие показания"),
         BotCommand(command="report", description="📈 Отчёт за период"),
+        BotCommand(command="live", description="📡 Live режим"),
         BotCommand(command="devices", description="📱 Мои устройства"),
         BotCommand(command="bind", description="🔗 Привязать устройство"),
         BotCommand(command="settings", description="⚙️ Настройки"),
@@ -268,17 +335,32 @@ async def cmd_status(message: Message):
             )
             telemetry = telemetry_result.scalar_one_or_none()
 
-            status_icon = "🟢" if device.is_online else "🔴"
+            # Determine online status based on last_seen and send_interval
+            online = is_device_online(device)
+            status_icon = "🟢" if online else "🔴"
             device_name = device.name or device.device_uid
 
             if telemetry:
                 emoji = get_co2_emoji(telemetry.co2)
                 status_text = get_co2_status(telemetry.co2)
-                text += (
-                    f"{status_icon} <b>{device_name}</b>\n"
-                    f"   CO2: <b>{telemetry.co2} ppm</b> {emoji} ({status_text})\n"
-                    f"   🌡 {telemetry.temperature:.1f}°C  💧 {telemetry.humidity:.0f}%\n\n"
-                )
+                time_ago = format_time_ago(telemetry.timestamp)
+
+                text += f"{status_icon} <b>{device_name}</b>\n"
+
+                if online:
+                    text += (
+                        f"   CO2: <b>{telemetry.co2} ppm</b> {emoji} ({status_text})\n"
+                        f"   🌡 {telemetry.temperature:.1f}°C  💧 {telemetry.humidity:.0f}%\n"
+                        f"   🕐 {time_ago}\n\n"
+                    )
+                else:
+                    # Device offline - show warning with last known data
+                    text += (
+                        f"   ⚠️ <b>Устройство не в сети</b>\n"
+                        f"   Последние данные ({time_ago}):\n"
+                        f"   CO2: {telemetry.co2} ppm {emoji}\n"
+                        f"   🌡 {telemetry.temperature:.1f}°C  💧 {telemetry.humidity:.0f}%\n\n"
+                    )
             else:
                 text += f"{status_icon} <b>{device_name}</b>\n   Нет данных\n\n"
 
@@ -332,7 +414,9 @@ async def cmd_devices(message: Message):
         text = "📱 <b>Ваши устройства:</b>\n\n"
 
         for device in devices:
-            status = "🟢 Online" if device.is_online else "🔴 Offline"
+            # Determine online status based on last_seen and send_interval
+            online = is_device_online(device)
+            status = "🟢 Online" if online else "🔴 Offline"
             name = device.name or "Без названия"
             location = device.location or "—"
 
@@ -343,9 +427,10 @@ async def cmd_devices(message: Message):
             )
 
             if device.last_seen:
-                text += f"   🕐 {format_datetime(device.last_seen, user_tz)}\n"
+                time_ago = format_time_ago(device.last_seen)
+                text += f"   🕐 Последняя связь: {time_ago}\n"
 
-            text += "\n"
+            text += f"   📡 Интервал: {device.send_interval} сек\n\n"
 
         await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
@@ -448,6 +533,31 @@ async def cmd_settings(message: Message):
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
+@router.message(Command("live"))
+async def cmd_live(message: Message):
+    """Handle /live command - start live monitoring mode."""
+    user_id = message.from_user.id
+
+    # Check if user already has an active live session
+    if user_id in active_live_sessions:
+        await message.answer(
+            "⚠️ <b>Live режим уже активен</b>\n\n"
+            "Для остановки нажмите кнопку ⏹ Остановить в активном сообщении.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    await message.answer(
+        "📡 <b>Live режим</b>\n\n"
+        "Показывает актуальные данные CO2, температуры и влажности "
+        "с автообновлением каждые 5 секунд.\n\n"
+        "Выберите длительность:",
+        reply_markup=get_live_duration_keyboard(),
+        parse_mode="HTML"
+    )
+
+
 @router.message(Command("help"))
 @router.message(F.text == BTN_HELP)
 async def cmd_help(message: Message):
@@ -457,10 +567,12 @@ async def cmd_help(message: Message):
         "<b>🎛 Основные функции:</b>\n"
         "📊 <b>Статус</b> — текущие показания\n"
         "📈 <b>Отчёт</b> — график за период\n"
+        "📡 <b>Live</b> — режим реального времени\n"
         "⚙️ <b>Настройки</b> — уведомления\n\n"
         "<b>📋 Команды:</b>\n"
         "/status — текущие показания\n"
         "/report — отчёт за период\n"
+        "/live — режим реального времени\n"
         "/devices — список устройств\n"
         "/bind — привязать устройство\n"
         "/settings — настройки\n\n"
@@ -490,7 +602,7 @@ async def cmd_admin(message: Message):
         devices_result = await session.execute(select(Device))
         devices = devices_result.scalars().all()
 
-        online_count = sum(1 for d in devices if d.is_online)
+        online_count = sum(1 for d in devices if is_device_online(d))
         total_count = len(devices)
 
         users_result = await session.execute(select(User))
@@ -954,6 +1066,201 @@ async def callback_settings(callback: CallbackQuery, state: FSMContext):
             pass
 
 
+@router.callback_query(F.data.startswith("live:"))
+async def callback_live(callback: CallbackQuery):
+    """Handle live mode callbacks."""
+    user_id = callback.from_user.id
+    action = callback.data.split(":")[1]
+
+    # Handle stop action
+    if action == "stop":
+        await callback.answer("Live режим остановлен")
+        if user_id in active_live_sessions:
+            session_data = active_live_sessions.pop(user_id)
+            if "task" in session_data and not session_data["task"].done():
+                session_data["task"].cancel()
+
+        try:
+            await callback.message.edit_text(
+                "⏹ <b>Live режим остановлен</b>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        return
+
+    # Start live mode with selected duration
+    duration_minutes = int(action)
+    await callback.answer(f"Запускаю Live режим на {duration_minutes} мин...")
+
+    # Check for existing session
+    if user_id in active_live_sessions:
+        await callback.message.edit_text(
+            "⚠️ Live режим уже активен",
+            parse_mode="HTML"
+        )
+        return
+
+    # Delete selection message
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    # Get user's device
+    async with async_session_maker() as session:
+        if settings.is_admin(user_id):
+            result = await session.execute(select(Device).limit(1))
+        else:
+            result = await session.execute(
+                select(Device).where(Device.owner_telegram_id == user_id).limit(1)
+            )
+        device = result.scalar_one_or_none()
+
+        if not device:
+            await callback.message.answer(
+                "📭 Нет привязанных устройств",
+                reply_markup=get_main_keyboard()
+            )
+            return
+
+    # Send initial message
+    live_msg = await callback.message.answer(
+        "📡 <b>Запуск Live режима...</b>",
+        parse_mode="HTML",
+        reply_markup=get_live_stop_keyboard()
+    )
+
+    # Calculate end time
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
+
+    # Start live update loop as background task
+    task = asyncio.create_task(
+        live_update_loop(
+            callback.bot,
+            user_id,
+            live_msg.chat.id,
+            live_msg.message_id,
+            device.id,
+            end_time,
+            duration_minutes
+        )
+    )
+
+    active_live_sessions[user_id] = {
+        "task": task,
+        "end_time": end_time,
+        "message_id": live_msg.message_id
+    }
+
+
+async def live_update_loop(
+    bot: Bot,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    device_id: int,
+    end_time: datetime,
+    duration_minutes: int
+):
+    """Background task that updates live message every 5 seconds."""
+    update_interval = 5  # seconds
+    last_update_text = ""
+
+    try:
+        while datetime.now(timezone.utc) < end_time:
+            # Check if session was cancelled
+            if user_id not in active_live_sessions:
+                break
+
+            # Get latest telemetry
+            async with async_session_maker() as session:
+                device_result = await session.execute(
+                    select(Device).where(Device.id == device_id)
+                )
+                device = device_result.scalar_one_or_none()
+
+                telemetry_result = await session.execute(
+                    select(Telemetry)
+                    .where(Telemetry.device_id == device_id)
+                    .order_by(desc(Telemetry.timestamp))
+                    .limit(1)
+                )
+                telemetry = telemetry_result.scalar_one_or_none()
+
+            if not device:
+                break
+
+            # Calculate remaining time
+            remaining = end_time - datetime.now(timezone.utc)
+            remaining_seconds = int(remaining.total_seconds())
+            remaining_str = f"{remaining_seconds // 60}:{remaining_seconds % 60:02d}"
+
+            # Build status text
+            online = is_device_online(device) if device else False
+            status_icon = "🟢" if online else "🔴"
+            device_name = device.name or device.device_uid if device else "—"
+
+            if telemetry:
+                emoji = get_co2_emoji(telemetry.co2)
+                status_text = get_co2_status(telemetry.co2)
+                time_ago = format_time_ago(telemetry.timestamp)
+
+                text = (
+                    f"📡 <b>Live режим</b> {status_icon}\n\n"
+                    f"📱 {device_name}\n\n"
+                    f"<b>CO2:</b> {telemetry.co2} ppm {emoji}\n"
+                    f"<b>Статус:</b> {status_text}\n\n"
+                    f"🌡 <b>Температура:</b> {telemetry.temperature:.1f}°C\n"
+                    f"💧 <b>Влажность:</b> {telemetry.humidity:.0f}%\n\n"
+                    f"🕐 Обновлено: {time_ago}\n"
+                    f"⏱ Осталось: {remaining_str}"
+                )
+            else:
+                text = (
+                    f"📡 <b>Live режим</b> {status_icon}\n\n"
+                    f"📱 {device_name}\n\n"
+                    f"⚠️ Нет данных от устройства\n\n"
+                    f"⏱ Осталось: {remaining_str}"
+                )
+
+            # Only update if text changed (avoid API rate limits)
+            if text != last_update_text:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=get_live_stop_keyboard()
+                    )
+                    last_update_text = text
+                except Exception as e:
+                    logger.debug(f"Live update error: {e}")
+
+            await asyncio.sleep(update_interval)
+
+    except asyncio.CancelledError:
+        logger.info(f"Live session cancelled for user {user_id}")
+    except Exception as e:
+        logger.error(f"Live loop error for user {user_id}: {e}")
+    finally:
+        # Cleanup
+        if user_id in active_live_sessions:
+            del active_live_sessions[user_id]
+
+        # Send final message
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"⏹ <b>Live режим завершён</b>\n\nДлительность: {duration_minutes} мин",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+
 @router.callback_query(F.data.startswith("admin:"))
 async def callback_admin(callback: CallbackQuery, state: FSMContext):
     """Handle admin panel callbacks."""
@@ -1007,7 +1314,8 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
 
             buttons = []
             for device in devices:
-                status = "🟢" if device.is_online else "🔴"
+                online = is_device_online(device)
+                status = "🟢" if online else "🔴"
                 name = device.name or device.device_uid
                 buttons.append([
                     InlineKeyboardButton(
@@ -1034,11 +1342,15 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
                 await callback.message.edit_text("❌ Не найдено")
                 return
 
-            status = "🟢 Online" if device.is_online else "🔴 Offline"
+            online = is_device_online(device)
+            status = "🟢 Online" if online else "🔴 Offline"
+            last_seen_text = format_time_ago(device.last_seen) if device.last_seen else "—"
+
             text = (
                 f"📱 <b>{device.name or device.device_uid}</b>\n\n"
                 f"UID: <code>{device.device_uid}</code>\n"
                 f"Статус: {status}\n"
+                f"Последняя связь: {last_seen_text}\n"
                 f"Код: <code>{device.activation_code}</code>\n"
                 f"Интервал: {device.send_interval} сек\n"
                 f"Прошивка: {device.firmware_version or '—'}\n"
@@ -1093,7 +1405,7 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
             devices_result = await session.execute(select(Device))
             devices = devices_result.scalars().all()
 
-            online_count = sum(1 for d in devices if d.is_online)
+            online_count = sum(1 for d in devices if is_device_online(d))
             total_count = len(devices)
 
             users_result = await session.execute(select(User))
