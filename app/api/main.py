@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "2.1.0"
+FIRMWARE_VERSION = "2.1.1"
 FIRMWARE_DATE = "2025-12-11"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Smart polling: display updates every 5s, Live mode support (5/10/15 min), Display on/off control via MQTT"
+FIRMWARE_CHANGELOG = "Removed sensor validation limits - real data always, display shows SENSOR ERROR if no data"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-CO2 Monitor - Main Device Script v2.1.0
+CO2 Monitor - Main Device Script v2.1.1
 
 This script is updated via OTA from server.
 It reads SCD41 sensor data and sends to MQTT broker.
 
 Features:
 - Real SCD41 sensor support (CO2, temperature, humidity)
-- Health check for bootstrap validation
+- No data filtering - real values always (SCD41 has built-in filtering)
 - MQTT telemetry with auto-reconnect
 - Remote configuration updates
-- Force update command via MQTT
 - Smart polling: display every 5s, MQTT at send_interval
 - Live mode: high-frequency telemetry (5s) for specified duration
 - Display control: enable/disable OLED via MQTT command
+- Display shows SENSOR ERROR if no data available
 """
 
 import json
@@ -142,8 +142,7 @@ class SCD41Sensor:
     def __init__(self):
         self.scd4x = None
         self.initialized = False
-        self._last_valid_reading = None
-        self._readings_to_skip = 2  # Skip first readings after init
+        self._readings_to_skip = 2  # Skip first 2 readings (sensor warmup)
 
     def init(self) -> bool:
         """Initialize SCD41 sensor."""
@@ -178,9 +177,13 @@ class SCD41Sensor:
             return False
 
     def read(self) -> dict | None:
-        """Read sensor data with validation."""
+        """
+        Read sensor data.
+
+        Returns actual sensor reading or None if not available.
+        Never returns cached/old values - we want real data always.
+        """
         if not self.initialized or self.scd4x is None:
-            # No demo mode in production - return None if sensor not working
             return None
 
         try:
@@ -189,66 +192,41 @@ class SCD41Sensor:
                 time.sleep(1)
                 if not self.scd4x.data_ready:
                     print("SCD41: Data not ready")
-                    return self._last_valid_reading
+                    return None
 
             co2 = self.scd4x.CO2
             temperature = self.scd4x.temperature
             humidity = self.scd4x.relative_humidity
 
-            # Skip first readings (often garbage)
+            # Skip first 2 readings (sensor warmup)
             if self._readings_to_skip > 0:
                 self._readings_to_skip -= 1
-                print(f"Skipping initial reading {2 - self._readings_to_skip}/2")
+                print(f"Skipping warmup reading {2 - self._readings_to_skip}/2")
                 return None
 
-            # Validate readings
-            if not self._validate_reading(co2, temperature, humidity):
-                print(f"Invalid reading: CO2={co2}, T={temperature}, H={humidity}")
-                return self._last_valid_reading
+            # Basic physical bounds check only
+            # CO2: 0-40000 ppm (SCD41 range)
+            # Temp: -10 to 60 C (SCD41 operating range)
+            # Humidity: 0-100%
+            if not (0 <= co2 <= 40000):
+                print(f"CO2 out of range: {co2}")
+                return None
+            if not (-10 <= temperature <= 60):
+                print(f"Temperature out of range: {temperature}")
+                return None
+            if not (0 <= humidity <= 100):
+                print(f"Humidity out of range: {humidity}")
+                return None
 
-            reading = {
+            return {
                 "co2": int(co2),
                 "temperature": round(temperature, 1),
                 "humidity": round(humidity, 1),
             }
 
-            self._last_valid_reading = reading
-            return reading
-
         except Exception as e:
             print(f"SCD41 read error: {e}")
-            return self._last_valid_reading
-
-    def _validate_reading(self, co2: int, temp: float, humidity: float) -> bool:
-        """Validate sensor readings are within reasonable bounds."""
-        # CO2: 400-5000 ppm is normal range
-        if not (300 <= co2 <= 10000):
-            return False
-
-        # Temperature: -10 to 50 C is reasonable indoor range
-        if not (-10 <= temp <= 50):
-            return False
-
-        # Humidity: 0-100%
-        if not (0 <= humidity <= 100):
-            return False
-
-        # Check for sudden jumps (if we have previous reading)
-        if self._last_valid_reading:
-            last_co2 = self._last_valid_reading["co2"]
-            last_temp = self._last_valid_reading["temperature"]
-
-            # CO2 shouldn't jump more than 500 ppm per reading
-            if abs(co2 - last_co2) > 500:
-                print(f"CO2 jump too large: {last_co2} -> {co2}")
-                return False
-
-            # Temperature shouldn't jump more than 3C per reading
-            if abs(temp - last_temp) > 3:
-                print(f"Temperature jump too large: {last_temp} -> {temp}")
-                return False
-
-        return True
+            return None
 
     def stop(self):
         """Stop sensor measurements."""
@@ -680,6 +658,11 @@ class CO2MQTTClient:
                         if need_mqtt_send:
                             self._send_telemetry(reading)
                             last_mqtt_send = now
+                    else:
+                        # Sensor returned no data - show error on display
+                        if need_display_update and self._display_enabled and self.display:
+                            self.display.show_status("SENSOR ERROR")
+                            last_display_update = now
 
                 # Sleep briefly to avoid busy loop
                 time.sleep(0.5)
