@@ -107,8 +107,8 @@ def publish_device_command(device_uid: str, command: str, **kwargs) -> bool:
 
     Args:
         device_uid: Device unique identifier
-        command: Command name (e.g., "force_update", "restart", "status", "live_mode", "display_on", "display_off")
-        **kwargs: Additional command parameters (e.g., duration for live_mode)
+        command: Command name (e.g., "force_update", "restart", "status", "live_mode", "display_on", "display_off", "calibrate")
+        **kwargs: Additional command parameters (e.g., duration for live_mode, target_co2 for calibrate)
 
     Returns:
         True if published successfully

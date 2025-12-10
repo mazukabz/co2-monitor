@@ -1527,6 +1527,9 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
                     InlineKeyboardButton(text="🔄 Force Update", callback_data=f"admin:force_update:{device_id}"),
                     InlineKeyboardButton(text="🔃 Restart", callback_data=f"admin:restart:{device_id}"),
                 ],
+                [
+                    InlineKeyboardButton(text="🎯 Калибровка CO2", callback_data=f"admin:calibrate:{device_id}"),
+                ],
                 [InlineKeyboardButton(text="◀️ К списку", callback_data="admin:devices")],
             ])
 
@@ -1688,6 +1691,70 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
             else:
                 await callback.message.answer(
                     f"⚠️ Настройка сохранена, но устройство offline.",
+                    reply_markup=get_main_keyboard()
+                )
+
+    elif action == "calibrate":
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            # Show confirmation with instructions
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подтвердить калибровку", callback_data=f"admin:calibrate_confirm:{device_id}")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin:device:{device_id}")],
+            ])
+
+            await callback.message.answer(
+                f"🎯 <b>Калибровка датчика CO2</b>\n\n"
+                f"📱 {device.name or device.device_uid}\n\n"
+                f"<b>⚠️ Важно перед калибровкой:</b>\n\n"
+                f"1️⃣ Откройте окна и проветрите помещение\n"
+                f"2️⃣ Подождите <b>5-10 минут</b> пока воздух обновится\n"
+                f"3️⃣ Убедитесь что датчик находится у открытого окна\n"
+                f"4️⃣ Нажмите подтвердить когда готовы\n\n"
+                f"<i>Калибровка установит текущий уровень CO2 как 420 ppm "
+                f"(среднее значение атмосферного CO2).</i>",
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+    elif action == "calibrate_confirm":
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            from app.mqtt.main import publish_device_command
+            success = publish_device_command(device.device_uid, "calibrate", target_co2=420)
+
+            if success:
+                await callback.message.answer(
+                    f"🎯 <b>Команда калибровки отправлена!</b>\n\n"
+                    f"📱 {device.name or device.device_uid}\n\n"
+                    f"Датчик будет откалиброван на 420 ppm.\n"
+                    f"Подождите несколько секунд, на дисплее появится подтверждение.",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await callback.message.answer(
+                    f"⚠️ Не удалось отправить команду. Устройство offline.",
                     reply_markup=get_main_keyboard()
                 )
 

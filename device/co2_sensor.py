@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CO2 Monitor - Main Device Script v2.1.1
+CO2 Monitor - Main Device Script v2.2.0
 
 This script is updated via OTA from server.
 It reads SCD41 sensor data and sends to MQTT broker.
@@ -14,6 +14,7 @@ Features:
 - Live mode: high-frequency telemetry (5s) for specified duration
 - Display control: enable/disable OLED via MQTT command
 - Display shows SENSOR ERROR if no data available
+- Manual CO2 calibration via MQTT command (force_calibration to 420 ppm)
 """
 
 import json
@@ -527,6 +528,54 @@ class CO2MQTTClient:
             try:
                 with open(CONFIG_FILE, "w") as f:
                     json.dump(self.config, f, indent=2)
+            except Exception:
+                pass
+
+        elif cmd == "calibrate":
+            # Force calibration to fresh air level (~420 ppm)
+            target_co2 = command.get("target_co2", 420)
+            self._perform_calibration(target_co2)
+
+    def _perform_calibration(self, target_co2: int = 420):
+        """
+        Perform forced recalibration of SCD41 sensor.
+
+        The sensor should be exposed to fresh outdoor air for at least
+        3 minutes before calling this. Target CO2 is typically 420 ppm
+        (current atmospheric CO2 level).
+        """
+        if not self.sensor.initialized or self.sensor.scd4x is None:
+            print("Calibration failed: sensor not initialized")
+            return
+
+        try:
+            scd = self.sensor.scd4x
+
+            # Stop periodic measurement for calibration
+            scd.stop_periodic_measurement()
+            time.sleep(0.5)
+
+            # Perform forced recalibration
+            # Note: Sensor should have been measuring for >3 min in stable conditions
+            correction = scd.force_calibration(target_co2)
+            print(f"Calibration complete! Target: {target_co2} ppm, correction: {correction}")
+
+            # Show on display
+            if self.display and self._display_enabled:
+                self.display.show_status(f"CAL OK: {correction}")
+                time.sleep(2)
+
+            # Restart periodic measurement
+            scd.start_periodic_measurement()
+            time.sleep(5)  # Wait for first measurement
+
+            print("Sensor recalibrated and restarted")
+
+        except Exception as e:
+            print(f"Calibration error: {e}")
+            # Try to restart measurement anyway
+            try:
+                self.sensor.scd4x.start_periodic_measurement()
             except Exception:
                 pass
 
