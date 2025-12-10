@@ -177,8 +177,13 @@ sudo bash ~/co2-monitor/install_service.sh
    - Создаёт backup текущей версии
    - Скачивает новую версию
    - Проверяет hash файла
-   - Запускает health check (30 сек)
+   - Запускает health check (5 попыток чтения сенсора, ~25 сек)
    - При ошибке — автоматический rollback
+
+**⚠️ Важно про Health Check:**
+- SCD41 пропускает первые 2 чтения как "мусор"
+- Health check делает 5 попыток (не 2!) чтобы получить валидные данные
+- Если меньше попыток — OTA всегда будет откатываться
 
 **Принудительное обновление:**
 - Через Telegram бот: Админ → ⚙️ Force Update
@@ -194,6 +199,61 @@ sudo bash ~/co2-monitor/install_service.sh
 | `/api/device/manifest` | Версия/hash текущей прошивки |
 | `/api/device/script` | main.py (обновляемый код) |
 | `/api/device/config` | Конфигурация MQTT |
+
+### SSH Tunnel (удалённый доступ к RPi)
+
+Reverse SSH туннель для доступа к Raspberry Pi из любого места:
+
+```
+[MacBook] --> [Server:2222] <-- [RPi tunnel] <-- [RPi SSH:22]
+```
+
+**Быстрый старт:**
+```bash
+# Подключение к RPi (после настройки)
+ssh co2-rpi
+# или
+ssh -p 2222 mazukabz@31.59.170.64
+```
+
+**Настройка нового устройства:**
+```bash
+# 1. На RPi — установить туннель
+curl -sL http://31.59.170.64:10900/tunnel-setup.sh | bash
+
+# 2. Скопировать PUBLIC KEY и отправить админу
+
+# 3. На сервере — добавить ключ
+echo "ssh-ed25519 AAAA... device_name" >> /opt/apps/ssh-tunnels/.ssh/authorized_keys
+
+# 4. На RPi — запустить туннель
+sudo systemctl start ssh-tunnel
+```
+
+**Настройка MacBook (~/.ssh/config):**
+```
+Host co2-rpi
+  HostName 31.59.170.64
+  Port 2222
+  User mazukabz
+  IdentityFile ~/.ssh/id_rpi
+```
+
+**Ключи без пароля!** Если ключ с паролем — будет "Permission denied":
+```bash
+# Создать ключ без пароля
+ssh-keygen -t ed25519 -f ~/.ssh/id_rpi -N ""
+# Добавить публичный ключ на RPi
+ssh co2-rpi "echo 'ssh-ed25519 AAAA...' >> ~/.ssh/authorized_keys"
+```
+
+**Порты туннелей:**
+| Порт | Устройство |
+|------|------------|
+| 2222 | CO2 Monitor RPi |
+| 2223-2230 | Зарезервировано |
+
+**Подробная документация:** [ssh-tunnels/README.md](../0.1%20SSH%20Tunnel/README.md)
 
 ## Структура проекта
 
@@ -358,45 +418,120 @@ scipy==1.11.4
 
 ## Troubleshooting
 
+### OTA обновление всегда откатывается (Rollback)
+
+**Симптом:** В логах `bootstrap.log` постоянно "Rollback successful"
+
+**Причина:** Health check не может прочитать сенсор
+```bash
+# Проверить логи
+ssh co2-rpi "tail -50 ~/co2-monitor/bootstrap.log"
+# Ищем: "Health check FAILED: Cannot read sensor"
+```
+
+**Решение:** Health check должен делать 5+ попыток чтения (SCD41 пропускает первые 2):
+```python
+# В co2_sensor.py, функция health_check()
+for attempt in range(5):  # НЕ 2!
+    time.sleep(5)
+    reading = sensor.read()
+```
+
 ### Устройство показывает старую версию
 
 ```bash
-# На устройстве
-cat ~/co2-monitor/version.json
+# Проверить версию на устройстве
+ssh co2-rpi "cat ~/co2-monitor/version.json"
 
-# Если версия старая — принудительное обновление
-rm ~/co2-monitor/version.json
-sudo systemctl restart co2-monitor
+# Проверить версию на сервере
+curl -s http://31.59.170.64:10900/api/device/manifest | jq .version
+
+# Принудительное обновление через Telegram или:
+ssh co2-rpi "rm ~/co2-monitor/version.json && sudo systemctl restart co2-monitor"
 ```
 
-### Устройство в DEMO mode (random data)
+### SSH: Permission denied (publickey)
+
+**Причины:**
+1. Ключ с паролем
+2. Публичный ключ не добавлен на RPi
+3. Неправильные права на authorized_keys
 
 ```bash
-# Полная переустановка
-sudo systemctl stop co2-monitor
-rm -rf ~/co2-monitor
-curl -sL http://SERVER:10900/install.py | python3
-sudo bash ~/co2-monitor/install_service.sh
+# 1. Проверить какой ключ используется
+ssh -v co2-rpi 2>&1 | grep "Offering public key"
+
+# 2. Создать ключ БЕЗ пароля
+ssh-keygen -t ed25519 -f ~/.ssh/id_rpi -N ""
+
+# 3. Проверить права на RPi
+ssh co2-rpi "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+
+# 4. Проверить fingerprint совпадает
+ssh-keygen -lf ~/.ssh/id_rpi.pub  # на MacBook
+ssh co2-rpi "ssh-keygen -lf ~/.ssh/authorized_keys"  # на RPi
 ```
 
-### Health check failed
+### Туннель не работает (Connection refused)
 
 ```bash
-# Посмотреть логи
-journalctl -u co2-monitor -n 50
+# На RPi — проверить статус
+sudo systemctl status ssh-tunnel
+journalctl -u ssh-tunnel -n 20
 
-# Если "No backup available" — это нормально при первой установке
-# Если ошибка в коде — проверить main.py создаёт файл .health_ok
+# На сервере — проверить порт
+ssh root@31.59.170.64 "ss -tlnp | grep 2222"
+
+# Перезапустить туннель
+ssh co2-rpi "sudo systemctl restart ssh-tunnel"
+```
+
+### Дисплей не работает (font5x8.bin not found)
+
+```bash
+# Проверить наличие файла
+ssh co2-rpi "ls -la ~/co2-monitor/font5x8.bin"
+
+# Если нет — перезапустить (bootstrap скачает)
+ssh co2-rpi "sudo systemctl restart co2-monitor"
+
+# Или скачать вручную
+ssh co2-rpi "cd ~/co2-monitor && curl -sLO https://github.com/adafruit/Adafruit_CircuitPython_framebuf/raw/main/examples/font5x8.bin"
+```
+
+### Сенсор "Data not ready"
+
+```bash
+# Проверить I2C устройства
+ssh co2-rpi "i2cdetect -y 1"
+# Должно быть: 0x3c (display), 0x62 (SCD41)
+
+# Перезапустить сервис
+ssh co2-rpi "sudo systemctl restart co2-monitor"
 ```
 
 ### MQTT не подключается
 
 ```bash
 # Проверить конфиг
-cat ~/co2-monitor/config.json
+ssh co2-rpi "cat ~/co2-monitor/config.json"
 
-# Проверить сервер
-curl http://SERVER:10900/api/device/config
+# Проверить доступность сервера
+ssh co2-rpi "nc -zv 31.59.170.64 10883"
+
+# Проверить логи
+ssh co2-rpi "journalctl -u co2-monitor -n 30 | grep -i mqtt"
+```
+
+### Полная переустановка (крайняя мера)
+
+```bash
+ssh co2-rpi "
+sudo systemctl stop co2-monitor
+rm -rf ~/co2-monitor
+curl -sL http://31.59.170.64:10900/install.py | python3
+sudo bash ~/co2-monitor/install_service.sh
+"
 ```
 
 ## Бэклог
@@ -505,7 +640,33 @@ devices/{uid}/logs      — устройство → сервер (ответ н
 
 ## История версий
 
-### v2.0.0 (текущая) — 2025-12-10
+### v2.0.6 (текущая) — 2025-12-11
+**Big Display + SSH Tunnels**
+
+Дисплей:
+- ✅ Большие цифры CO2 (scale=4, ~24x28px на цифру)
+- ✅ Компактный байтовый шрифт (70 bytes вместо строк)
+- ✅ Универсальные методы `big_text()` и `big_number()`
+- ✅ Автоцентрирование для 3-4 значных чисел
+
+SSH:
+- ✅ Reverse SSH tunnel через autossh
+- ✅ Скрипт установки `/tunnel-setup.sh`
+- ✅ Документация по настройке ключей
+
+### v2.0.5 — 2025-12-11
+**Fix OTA Health Check**
+
+- ✅ Health check: 5 попыток чтения сенсора (было 2)
+- ✅ Исправлен вечный rollback из-за пропуска первых 2 чтений SCD41
+
+### v2.0.4 — 2025-12-11
+**Auto-download font file**
+
+- ✅ Автоматическая загрузка font5x8.bin для дисплея
+- ✅ Исправлена ошибка "font5x8.bin not found"
+
+### v2.0.0 — 2025-12-10
 **OTA-система и реальные датчики**
 
 Устройство:
