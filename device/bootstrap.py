@@ -300,6 +300,29 @@ def run_health_check() -> bool:
 
 # ==================== MAIN EXECUTION ====================
 
+def download_font_file():
+    """Download font5x8.bin required by adafruit_framebuf for text display."""
+    font_file = INSTALL_DIR / "font5x8.bin"
+    if font_file.exists():
+        return True  # Already downloaded
+
+    font_url = "https://github.com/adafruit/Adafruit_CircuitPython_framebuf/raw/main/examples/font5x8.bin"
+
+    try:
+        log("Downloading font5x8.bin for display...")
+        response = urlopen(font_url, timeout=30)
+        content = response.read()
+
+        with open(font_file, "wb") as f:
+            f.write(content)
+
+        log(f"Font file downloaded ({len(content)} bytes)")
+        return True
+    except Exception as e:
+        log(f"Failed to download font file: {e}", "WARN")
+        return False
+
+
 def install_dependencies():
     """Install Python dependencies if requirements.txt exists."""
     req_file = INSTALL_DIR / "requirements.txt"
@@ -326,6 +349,10 @@ def install_dependencies():
                 timeout=300,
             )
         log("Dependencies installed")
+
+        # Download font file for display (required by adafruit_framebuf)
+        download_font_file()
+
     except Exception as e:
         log(f"Failed to install dependencies: {e}", "WARN")
 

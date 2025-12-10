@@ -258,6 +258,33 @@ class SCD41Sensor:
 
 # ==================== DISPLAY (SSD1306 OLED) ====================
 
+def ensure_font_file() -> bool:
+    """
+    Download font5x8.bin if not present.
+    Required by adafruit_framebuf for text display.
+    """
+    font_file = INSTALL_DIR / "font5x8.bin"
+    if font_file.exists():
+        return True
+
+    font_url = "https://github.com/adafruit/Adafruit_CircuitPython_framebuf/raw/main/examples/font5x8.bin"
+
+    try:
+        from urllib.request import urlopen
+        print("Downloading font5x8.bin for display...")
+        response = urlopen(font_url, timeout=30)
+        content = response.read()
+
+        with open(font_file, "wb") as f:
+            f.write(content)
+
+        print(f"Font file downloaded ({len(content)} bytes)")
+        return True
+    except Exception as e:
+        print(f"Failed to download font file: {e}")
+        return False
+
+
 class Display:
     """SSD1306 OLED Display (128x64) via I2C."""
 
@@ -268,6 +295,9 @@ class Display:
     def init(self) -> bool:
         """Initialize SSD1306 OLED display."""
         try:
+            # Ensure font file exists (required for text display)
+            ensure_font_file()
+
             import board
             import adafruit_ssd1306
 
