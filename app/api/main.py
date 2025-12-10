@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "2.0.4"
-FIRMWARE_DATE = "2025-12-11"  # YYYY-MM-DD format - bumped to force device update
-FIRMWARE_CHANGELOG = "Fix display: auto-download font5x8.bin for text rendering"
+FIRMWARE_VERSION = "2.0.5"
+FIRMWARE_DATE = "2025-12-11"  # YYYY-MM-DD format
+FIRMWARE_CHANGELOG = "Fix OTA health check: increase sensor read attempts (was failing after 2 skipped readings)"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")

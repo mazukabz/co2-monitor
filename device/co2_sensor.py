@@ -586,16 +586,17 @@ def run_health_check(sensor: SCD41Sensor, config: dict) -> bool:
         print("Health check FAILED: Sensor init failed")
         return False
 
-    # 2. Try to read sensor
-    time.sleep(5)  # Wait for sensor
-    reading = sensor.read()
-    if reading is None:
-        # Try once more
-        time.sleep(5)
+    # 2. Try to read sensor (need multiple attempts because first 2 readings are skipped)
+    reading = None
+    for attempt in range(5):  # 5 attempts to account for 2 skipped readings
+        time.sleep(5)  # Wait for sensor
         reading = sensor.read()
+        if reading is not None:
+            break
+        print(f"Health check: Waiting for sensor (attempt {attempt + 1}/5)...")
 
     if reading is None:
-        print("Health check FAILED: Cannot read sensor")
+        print("Health check FAILED: Cannot read sensor after 5 attempts")
         return False
 
     print(f"Health check: Sensor OK - CO2={reading['co2']}ppm")
