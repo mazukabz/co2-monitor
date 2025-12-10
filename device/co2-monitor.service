@@ -1,0 +1,20 @@
+[Unit]
+Description=CO2 Monitor Device Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/co2-monitor
+ExecStart=/usr/bin/python3 /home/pi/co2-monitor/bootstrap.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target

@@ -65,6 +65,34 @@ def publish_device_config(device_uid: str, config: dict) -> bool:
         return False
 
 
+def publish_device_command(device_uid: str, command: str) -> bool:
+    """
+    Publish command to a device.
+
+    Args:
+        device_uid: Device unique identifier
+        command: Command name (e.g., "force_update", "restart", "status")
+
+    Returns:
+        True if published successfully
+    """
+    client = get_mqtt_client()
+    if not client or not client.is_connected():
+        print(f"⚠️ MQTT client not connected, cannot send command to {device_uid}")
+        return False
+
+    topic = f"devices/{device_uid}/commands"
+    payload = json.dumps({"command": command})
+
+    result = client.publish(topic, payload, qos=1)
+    if result.rc == mqtt.MQTT_ERR_SUCCESS:
+        print(f"📤 Command sent to {device_uid}: {command}")
+        return True
+    else:
+        print(f"❌ Failed to send command to {device_uid}: {result.rc}")
+        return False
+
+
 class MQTTProcessor:
     """Processes MQTT messages from CO2 devices."""
 

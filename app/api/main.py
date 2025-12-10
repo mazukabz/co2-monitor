@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "1.0.2"
-FIRMWARE_DATE = "2025-12-08"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Fix: correct MQTT port in config"
+FIRMWARE_VERSION = "2.0.0"
+FIRMWARE_DATE = "2025-12-10"  # YYYY-MM-DD format
+FIRMWARE_CHANGELOG = "Real SCD41 sensor support, OTA bootstrap, health checks, validation"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")
@@ -64,40 +64,56 @@ async def get_installer_script():
     """
     Return the minimal installer script.
     Device runs: curl -sL http://server/install.py | python3
+
+    This installs bootstrap.py which then handles OTA updates.
     """
     script = f'''#!/usr/bin/env python3
 """CO2 Monitor - Device Installer. Run: curl -sL http://{SERVER_HOST}:10900/install.py | python3"""
-import os, sys, tarfile, tempfile
+import os, sys
 from urllib.request import urlopen
 
 SERVER = "http://{SERVER_HOST}:10900"
 INSTALL_DIR = os.path.expanduser("~/co2-monitor")
 
 print("=" * 50)
-print("CO2 Monitor - Installing...")
+print("CO2 Monitor - Installing v{FIRMWARE_VERSION}")
 print("=" * 50)
-
-try:
-    data = urlopen(f"{{SERVER}}/api/device/package", timeout=60).read()
-except Exception as e:
-    print(f"Error: {{e}}")
-    sys.exit(1)
 
 os.makedirs(INSTALL_DIR, exist_ok=True)
 
-with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as f:
-    f.write(data)
-    tmp = f.name
-
+# Download bootstrap.py (immutable loader)
+print("Downloading bootstrap.py...")
 try:
-    with tarfile.open(tmp, "r:gz") as tar:
-        tar.extractall(INSTALL_DIR)
-finally:
-    os.unlink(tmp)
+    bootstrap_code = urlopen(f"{{SERVER}}/api/device/bootstrap", timeout=60).read()
+    with open(os.path.join(INSTALL_DIR, "bootstrap.py"), "wb") as f:
+        f.write(bootstrap_code)
+    print("Bootstrap downloaded successfully")
+except Exception as e:
+    print(f"Error downloading bootstrap: {{e}}")
+    sys.exit(1)
 
-print(f"Installed to " + INSTALL_DIR)
-print(f"\\nTo run: cd " + INSTALL_DIR + " && python3 main.py")
-print(f"To install service: cd " + INSTALL_DIR + " && sudo bash install_service.sh")
+# Download install_service.sh
+print("Downloading install_service.sh...")
+try:
+    service_script = urlopen(f"{{SERVER}}/api/device/install_service", timeout=60).read()
+    with open(os.path.join(INSTALL_DIR, "install_service.sh"), "wb") as f:
+        f.write(service_script)
+    os.chmod(os.path.join(INSTALL_DIR, "install_service.sh"), 0o755)
+    print("Service installer downloaded")
+except Exception as e:
+    print(f"Warning: Could not download service installer: {{e}}")
+
+# Create minimal requirements.txt
+requirements = "paho-mqtt>=2.0.0\\nadafruit-circuitpython-scd4x\\nadafruit-circuitpython-ssd1306\\n"
+with open(os.path.join(INSTALL_DIR, "requirements.txt"), "w") as f:
+    f.write(requirements)
+
+print(f"\\nInstalled to " + INSTALL_DIR)
+print(f"\\nNext steps:")
+print(f"1. Install dependencies: pip3 install -r " + INSTALL_DIR + "/requirements.txt")
+print(f"2. Run: python3 " + INSTALL_DIR + "/bootstrap.py")
+print(f"3. Or install as service: sudo bash " + INSTALL_DIR + "/install_service.sh")
+print(f"\\nBootstrap will automatically download the latest firmware on first run.")
 '''
     return Response(content=script, media_type="text/x-python")
 
@@ -142,7 +158,7 @@ async def get_device_package():
         tar.addfile(version_info, io.BytesIO(version_data))
 
         # 4. Requirements
-        requirements = b"paho-mqtt>=2.0.0\\n"
+        requirements = b"paho-mqtt>=2.0.0\nadafruit-circuitpython-scd4x\nadafruit-circuitpython-ssd1306\n"
         req_info = tarfile.TarInfo(name="requirements.txt")
         req_info.size = len(requirements)
         tar.addfile(req_info, io.BytesIO(requirements))
@@ -292,6 +308,40 @@ Edit config.json or set environment variables:
 
 # ==================== DEVICE OTA ENDPOINTS ====================
 
+@app.get("/api/device/install_service")
+async def get_install_service_script():
+    """Download install_service.sh for systemd setup."""
+    script_path = DEVICE_DIR / "install_service.sh"
+
+    if not script_path.exists():
+        return JSONResponse({"error": "Install script not found"}, status_code=404)
+
+    return FileResponse(
+        script_path,
+        media_type="text/x-shellscript",
+        filename="install_service.sh",
+    )
+
+
+@app.get("/api/device/bootstrap")
+async def get_bootstrap_script():
+    """
+    Download bootstrap.py - the immutable OTA loader.
+    This file should NEVER change once deployed to device.
+    It handles checking for updates, downloading, and rollback.
+    """
+    bootstrap_path = DEVICE_DIR / "bootstrap.py"
+
+    if not bootstrap_path.exists():
+        return JSONResponse({"error": "Bootstrap not found"}, status_code=404)
+
+    return FileResponse(
+        bootstrap_path,
+        media_type="text/x-python",
+        filename="bootstrap.py",
+    )
+
+
 @app.get("/api/device/manifest")
 async def get_device_manifest(device_uid: str = Query(None)):
     """
@@ -306,13 +356,14 @@ async def get_device_manifest(device_uid: str = Query(None)):
         "hash": get_file_hash(script_path),
         "changelog": FIRMWARE_CHANGELOG,
         "package_url": "/api/device/package",
+        "script_url": "/api/device/script",
         "server_time": datetime.utcnow().isoformat(),
     }
 
 
 @app.get("/api/device/script")
 async def get_device_script():
-    """Download main device script."""
+    """Download main device script (main.py / co2_sensor.py)."""
     script_path = DEVICE_DIR / "co2_sensor.py"
 
     if not script_path.exists():
@@ -321,10 +372,11 @@ async def get_device_script():
     return FileResponse(
         script_path,
         media_type="text/x-python",
-        filename="co2_sensor.py",
+        filename="main.py",
         headers={
             "X-Firmware-Version": FIRMWARE_VERSION,
             "X-Firmware-Date": FIRMWARE_DATE,
+            "X-Content-Hash": get_file_hash(script_path),
         }
     )
 
@@ -361,11 +413,16 @@ async def root():
         "service": "CO2 Monitor API",
         "version": FIRMWARE_VERSION,
         "date": FIRMWARE_DATE,
+        "changelog": FIRMWARE_CHANGELOG,
         "install": f"curl -sL http://{SERVER_HOST}:10900/install.py | python3",
         "endpoints": {
             "install_script": "/install.py",
-            "package": "/api/device/package",
+            "bootstrap": "/api/device/bootstrap",
+            "install_service": "/api/device/install_service",
             "manifest": "/api/device/manifest",
+            "script": "/api/device/script",
+            "config": "/api/device/config",
+            "package": "/api/device/package",
             "health": "/health",
         }
     }

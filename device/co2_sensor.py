@@ -1,104 +1,98 @@
 #!/usr/bin/env python3
 """
-CO2 Monitor - Raspberry Pi Device Client
+CO2 Monitor - Main Device Script v2.0.0
 
-This script runs on Raspberry Pi and:
-1. Reads CO2, temperature, humidity from sensors
-2. Sends telemetry to MQTT broker every N seconds
-3. Auto-reconnects if connection lost
-4. Auto-updates from server (OTA)
+This script is updated via OTA from server.
+It reads SCD41 sensor data and sends to MQTT broker.
 
-Requirements:
-    pip install paho-mqtt
-
-Sensor support:
-    - MH-Z19 (CO2 via UART)
-    - DHT22 / AM2302 (Temperature, Humidity)
-    - BME280 (Temperature, Humidity, Pressure)
-
-Configuration:
-    Edit CONFIG section below or use environment variables
+Features:
+- Real SCD41 sensor support (CO2, temperature, humidity)
+- Health check for bootstrap validation
+- MQTT telemetry with auto-reconnect
+- Remote configuration updates
+- Force update command via MQTT
 """
 
 import json
 import os
+import signal
 import socket
+import sys
 import time
-import uuid
 from datetime import datetime
+from pathlib import Path
 
-import paho.mqtt.client as mqtt
+# ==================== CONFIGURATION ====================
 
-# ==================== CONFIG ====================
+INSTALL_DIR = Path(__file__).parent
+CONFIG_FILE = INSTALL_DIR / "config.json"
+HEALTH_FILE = INSTALL_DIR / ".health_ok"
+VERSION_FILE = INSTALL_DIR / "version.json"
+
+# Default config (overridden by config.json)
+DEFAULT_CONFIG = {
+    "mqtt_broker": "31.59.170.64",
+    "mqtt_port": 10883,
+    "send_interval": 60,
+    "device_uid": "",
+    "device_name": "CO2 Monitor",
+}
+
 
 def load_config() -> dict:
-    """Load config from file or environment."""
-    config = {
-        "MQTT_BROKER": "31.59.170.64",
-        "MQTT_PORT": 10883,
-        "DEVICE_UID": "",
-        "DEVICE_NAME": "",
-        "FIRMWARE_VERSION": "1.0.0",
-        "SEND_INTERVAL": 60,
-        "DEMO_MODE": False,
-    }
+    """Load configuration from file."""
+    config = DEFAULT_CONFIG.copy()
 
-    # Load from config file if available (set by bootstrap.py)
-    config_file = os.getenv("CO2_CONFIG_FILE", "")
-    if config_file and os.path.exists(config_file):
+    if CONFIG_FILE.exists():
         try:
-            with open(config_file, "r") as f:
+            with open(CONFIG_FILE) as f:
                 file_config = json.load(f)
-                config["MQTT_BROKER"] = file_config.get("mqtt_broker", config["MQTT_BROKER"])
-                config["MQTT_PORT"] = int(file_config.get("mqtt_port", config["MQTT_PORT"]))
-                config["DEVICE_UID"] = file_config.get("device_uid", config["DEVICE_UID"])
-                config["DEVICE_NAME"] = file_config.get("device_name", config["DEVICE_NAME"])
-                config["SEND_INTERVAL"] = int(file_config.get("send_interval", config["SEND_INTERVAL"]))
-                print(f"Loaded config from {config_file}")
+                config.update(file_config)
         except Exception as e:
-            print(f"Warning: Could not load config file: {e}")
+            print(f"Warning: Could not load config: {e}")
 
-    # Environment variables override file config
-    config["MQTT_BROKER"] = os.getenv("MQTT_BROKER", config["MQTT_BROKER"])
-    config["MQTT_PORT"] = int(os.getenv("MQTT_PORT", str(config["MQTT_PORT"])))
-    config["DEVICE_UID"] = os.getenv("CO2_DEVICE_UID", os.getenv("DEVICE_UID", config["DEVICE_UID"]))
-    config["DEVICE_NAME"] = os.getenv("DEVICE_NAME", config["DEVICE_NAME"])
-    config["SEND_INTERVAL"] = int(os.getenv("SEND_INTERVAL", str(config["SEND_INTERVAL"])))
-    config["DEMO_MODE"] = os.getenv("DEMO_MODE", "false").lower() == "true"
+    # Environment overrides
+    config["mqtt_broker"] = os.getenv("MQTT_BROKER", config["mqtt_broker"])
+    config["mqtt_port"] = int(os.getenv("MQTT_PORT", str(config["mqtt_port"])))
+    config["send_interval"] = int(os.getenv("SEND_INTERVAL", str(config["send_interval"])))
+    config["device_uid"] = os.getenv("DEVICE_UID", config["device_uid"])
 
     return config
 
 
-CONFIG = load_config()
+def get_version() -> str:
+    """Get current firmware version."""
+    if VERSION_FILE.exists():
+        try:
+            with open(VERSION_FILE) as f:
+                return json.load(f).get("version", "unknown")
+        except Exception:
+            pass
+    return "unknown"
+
 
 # ==================== DEVICE UID ====================
 
-def get_or_create_device_uid() -> str:
-    """Get existing device UID or create new one."""
-    if CONFIG["DEVICE_UID"]:
-        return CONFIG["DEVICE_UID"]
+def get_device_uid(config: dict) -> str:
+    """Get or generate device UID."""
+    if config.get("device_uid"):
+        return config["device_uid"]
 
-    # Try to load from file
-    uid_file = os.path.expanduser("~/.co2_device_uid")
+    uid_file = INSTALL_DIR / ".device_uid"
+    if uid_file.exists():
+        return uid_file.read_text().strip()
 
-    if os.path.exists(uid_file):
-        with open(uid_file, "r") as f:
-            return f.read().strip()
-
-    # Generate new UID based on MAC address
+    # Generate from MAC address
+    import uuid
     mac = uuid.getnode()
     device_uid = f"rpi_{mac:012x}"
+    uid_file.write_text(device_uid)
 
-    # Save for future runs
-    with open(uid_file, "w") as f:
-        f.write(device_uid)
-
-    print(f"Generated new Device UID: {device_uid}")
     return device_uid
 
 
 def get_local_ip() -> str:
-    """Get local IP address."""
+    """Get device IP address."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -109,263 +103,548 @@ def get_local_ip() -> str:
         return "unknown"
 
 
-# ==================== SENSORS ====================
+# ==================== SCD41 SENSOR ====================
 
-class DemoSensor:
-    """Fake sensor for testing (generates random data)."""
+class SCD41Sensor:
+    """Sensirion SCD41 CO2/Temperature/Humidity sensor via I2C."""
 
     def __init__(self):
-        import random
-        self.random = random
+        self.scd4x = None
+        self.initialized = False
+        self._last_valid_reading = None
+        self._readings_to_skip = 2  # Skip first readings after init
 
-    def read(self) -> dict:
-        """Generate random sensor data."""
-        return {
-            "co2": self.random.randint(400, 1200),
-            "temperature": round(self.random.uniform(18, 28), 1),
-            "humidity": round(self.random.uniform(30, 70), 1),
-        }
-
-
-class MHZ19Sensor:
-    """MH-Z19 CO2 sensor via UART."""
-
-    def __init__(self, serial_port: str = "/dev/serial0"):
+    def init(self) -> bool:
+        """Initialize SCD41 sensor."""
         try:
-            import serial
-            self.serial = serial.Serial(
-                serial_port,
-                baudrate=9600,
-                timeout=1
-            )
-        except ImportError:
-            raise ImportError("Install pyserial: pip install pyserial")
-        except Exception as e:
-            raise Exception(f"Cannot open serial port {serial_port}: {e}")
-
-    def read(self) -> dict:
-        """Read CO2 value from MH-Z19."""
-        # Send read command
-        cmd = bytes([0xFF, 0x01, 0x86, 0x00, 0x00, 0x00, 0x00, 0x00, 0x79])
-        self.serial.write(cmd)
-        time.sleep(0.1)
-
-        response = self.serial.read(9)
-        if len(response) != 9 or response[0] != 0xFF or response[1] != 0x86:
-            raise Exception("Invalid MH-Z19 response")
-
-        co2 = response[2] * 256 + response[3]
-        return {"co2": co2}
-
-
-class DHT22Sensor:
-    """DHT22 / AM2302 temperature and humidity sensor."""
-
-    def __init__(self, gpio_pin: int = 4):
-        try:
-            import adafruit_dht
             import board
-            # Get GPIO pin
-            pin = getattr(board, f"D{gpio_pin}")
-            self.dht = adafruit_dht.DHT22(pin)
-        except ImportError:
-            raise ImportError(
-                "Install Adafruit DHT library:\n"
-                "pip install adafruit-circuitpython-dht\n"
-                "sudo apt-get install libgpiod2"
-            )
+            import adafruit_scd4x
 
-    def read(self) -> dict:
-        """Read temperature and humidity from DHT22."""
-        for _ in range(3):  # Retry up to 3 times
+            i2c = board.I2C()
+            self.scd4x = adafruit_scd4x.SCD4X(i2c)
+
+            # Stop any existing measurements
+            self.scd4x.stop_periodic_measurement()
+            time.sleep(0.5)
+
+            # Start periodic measurement (every 5 seconds internally)
+            self.scd4x.start_periodic_measurement()
+
+            # Wait for first measurement
+            print("Waiting for SCD41 to warm up...")
+            time.sleep(5)
+
+            self.initialized = True
+            print("SCD41 sensor initialized")
+            return True
+
+        except ImportError as e:
+            print(f"SCD41 library not installed: {e}")
+            print("Install with: pip install adafruit-circuitpython-scd4x")
+            return False
+        except Exception as e:
+            print(f"SCD41 init error: {e}")
+            return False
+
+    def read(self) -> dict | None:
+        """Read sensor data with validation."""
+        if not self.initialized or self.scd4x is None:
+            # No demo mode in production - return None if sensor not working
+            return None
+
+        try:
+            # Wait for data to be ready
+            if not self.scd4x.data_ready:
+                time.sleep(1)
+                if not self.scd4x.data_ready:
+                    print("SCD41: Data not ready")
+                    return self._last_valid_reading
+
+            co2 = self.scd4x.CO2
+            temperature = self.scd4x.temperature
+            humidity = self.scd4x.relative_humidity
+
+            # Skip first readings (often garbage)
+            if self._readings_to_skip > 0:
+                self._readings_to_skip -= 1
+                print(f"Skipping initial reading {2 - self._readings_to_skip}/2")
+                return None
+
+            # Validate readings
+            if not self._validate_reading(co2, temperature, humidity):
+                print(f"Invalid reading: CO2={co2}, T={temperature}, H={humidity}")
+                return self._last_valid_reading
+
+            reading = {
+                "co2": int(co2),
+                "temperature": round(temperature, 1),
+                "humidity": round(humidity, 1),
+            }
+
+            self._last_valid_reading = reading
+            return reading
+
+        except Exception as e:
+            print(f"SCD41 read error: {e}")
+            return self._last_valid_reading
+
+    def _validate_reading(self, co2: int, temp: float, humidity: float) -> bool:
+        """Validate sensor readings are within reasonable bounds."""
+        # CO2: 400-5000 ppm is normal range
+        if not (300 <= co2 <= 10000):
+            return False
+
+        # Temperature: -10 to 50 C is reasonable indoor range
+        if not (-10 <= temp <= 50):
+            return False
+
+        # Humidity: 0-100%
+        if not (0 <= humidity <= 100):
+            return False
+
+        # Check for sudden jumps (if we have previous reading)
+        if self._last_valid_reading:
+            last_co2 = self._last_valid_reading["co2"]
+            last_temp = self._last_valid_reading["temperature"]
+
+            # CO2 shouldn't jump more than 500 ppm per reading
+            if abs(co2 - last_co2) > 500:
+                print(f"CO2 jump too large: {last_co2} -> {co2}")
+                return False
+
+            # Temperature shouldn't jump more than 3C per reading
+            if abs(temp - last_temp) > 3:
+                print(f"Temperature jump too large: {last_temp} -> {temp}")
+                return False
+
+        return True
+
+    def stop(self):
+        """Stop sensor measurements."""
+        if self.scd4x:
             try:
-                return {
-                    "temperature": round(self.dht.temperature, 1),
-                    "humidity": round(self.dht.humidity, 1),
-                }
-            except RuntimeError:
-                time.sleep(2)
-        raise Exception("Failed to read DHT22")
+                self.scd4x.stop_periodic_measurement()
+            except Exception:
+                pass
 
 
-class CombinedSensor:
-    """Combines multiple sensors into one reading."""
+# ==================== DISPLAY (SSD1306 OLED) ====================
 
-    def __init__(self, sensors: list):
-        self.sensors = sensors
+class Display:
+    """SSD1306 OLED Display (128x64) via I2C."""
 
-    def read(self) -> dict:
-        """Read from all sensors and combine results."""
-        result = {}
-        for sensor in self.sensors:
-            try:
-                data = sensor.read()
-                result.update(data)
-            except Exception as e:
-                print(f"Warning: Failed to read from {type(sensor).__name__}: {e}")
-        return result
+    def __init__(self):
+        self.display = None
+        self.initialized = False
+
+    def init(self) -> bool:
+        """Initialize SSD1306 OLED display."""
+        try:
+            import board
+            import adafruit_ssd1306
+
+            i2c = board.I2C()
+            self.display = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c)
+            self.display.fill(0)
+            self.display.show()
+
+            self.initialized = True
+            print("Display initialized (SSD1306 128x64)")
+            return True
+
+        except ImportError as e:
+            print(f"Display library not installed: {e}")
+            print("Install with: pip install adafruit-circuitpython-ssd1306")
+            return False
+        except Exception as e:
+            print(f"Display init error (continuing without display): {e}")
+            return False
+
+    def show(self, co2: int, temp: float, humidity: float):
+        """Display sensor readings."""
+        if not self.initialized or self.display is None:
+            return
+
+        try:
+            self.display.fill(0)
+
+            # CO2 level - large text at top
+            co2_text = f"CO2: {co2} ppm"
+            self.display.text(co2_text, 0, 0, 1)
+
+            # Status indicator based on CO2 level
+            if co2 < 800:
+                status = "Good"
+            elif co2 < 1000:
+                status = "OK"
+            elif co2 < 1500:
+                status = "Ventilate!"
+            else:
+                status = "CRITICAL!"
+            self.display.text(status, 0, 16, 1)
+
+            # Temperature and humidity
+            self.display.text(f"Temp: {temp:.1f} C", 0, 32, 1)
+            self.display.text(f"Hum:  {humidity:.0f} %", 0, 48, 1)
+
+            self.display.show()
+
+        except Exception as e:
+            print(f"Display error: {e}")
+
+    def show_status(self, message: str):
+        """Show status message on display."""
+        if not self.initialized or self.display is None:
+            return
+
+        try:
+            self.display.fill(0)
+            self.display.text(message, 0, 28, 1)
+            self.display.show()
+        except Exception:
+            pass
+
+    def clear(self):
+        """Clear the display."""
+        if not self.initialized or self.display is None:
+            return
+
+        try:
+            self.display.fill(0)
+            self.display.show()
+        except Exception:
+            pass
 
 
 # ==================== MQTT CLIENT ====================
 
-class CO2DeviceClient:
-    """MQTT client for CO2 device."""
+class CO2MQTTClient:
+    """MQTT client for telemetry and commands."""
 
-    def __init__(self, sensor):
+    def __init__(self, config: dict, sensor: SCD41Sensor, display: Display = None):
+        import paho.mqtt.client as mqtt
+
+        self.config = config
         self.sensor = sensor
-        self.device_uid = get_or_create_device_uid()
+        self.display = display
+        self.device_uid = get_device_uid(config)
+        self.version = get_version()
         self.local_ip = get_local_ip()
+        self.start_time = time.time()
 
-        self.client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
-            client_id=f"co2_device_{self.device_uid}"
-        )
+        # MQTT topics
+        self.topic_telemetry = f"devices/{self.device_uid}/telemetry"
+        self.topic_config = f"devices/{self.device_uid}/config"
+        self.topic_commands = f"devices/{self.device_uid}/commands"
+        self.topic_status = f"devices/{self.device_uid}/status"
+
+        # MQTT client
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
+
+        # Set Last Will (offline when disconnected)
+        self.client.will_set(self.topic_status, "offline", retain=True)
 
         self.connected = False
+        self.running = False
+        self._force_update_requested = False
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
-        """Called when connected to broker."""
+        """Handle MQTT connection."""
         if reason_code == 0:
             print(f"[{datetime.now():%H:%M:%S}] Connected to MQTT broker")
             self.connected = True
+
+            # Subscribe to config and commands
+            client.subscribe(self.topic_config)
+            client.subscribe(self.topic_commands)
+
+            # Announce online
+            client.publish(self.topic_status, "online", retain=True)
         else:
             print(f"[{datetime.now():%H:%M:%S}] Connection failed: {reason_code}")
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties):
-        """Called when disconnected."""
-        print(f"[{datetime.now():%H:%M:%S}] Disconnected from broker")
+        """Handle MQTT disconnection."""
+        print(f"[{datetime.now():%H:%M:%S}] Disconnected: {reason_code}")
         self.connected = False
 
-    def connect(self):
-        """Connect to MQTT broker."""
-        print(f"Connecting to {CONFIG['MQTT_BROKER']}:{CONFIG['MQTT_PORT']}...")
-        self.client.connect(
-            CONFIG["MQTT_BROKER"],
-            CONFIG["MQTT_PORT"],
-            keepalive=60
-        )
-        self.client.loop_start()
-
-    def send_telemetry(self):
-        """Read sensors and send telemetry."""
+    def _on_message(self, client, userdata, msg):
+        """Handle incoming MQTT messages."""
         try:
-            # Read sensor data
-            data = self.sensor.read()
+            payload = json.loads(msg.payload.decode())
+            print(f"[{datetime.now():%H:%M:%S}] Received: {msg.topic} -> {payload}")
 
-            # Build telemetry message
-            payload = {
-                **data,
-                "device_uid": self.device_uid,
-                "name": CONFIG["DEVICE_NAME"] or None,
-                "firmware_version": CONFIG["FIRMWARE_VERSION"],
-                "ip": self.local_ip,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-            # Publish to MQTT
-            topic = f"devices/{self.device_uid}/telemetry"
-            self.client.publish(topic, json.dumps(payload), qos=1)
-
-            print(
-                f"[{datetime.now():%H:%M:%S}] Sent: "
-                f"CO2={data.get('co2', '?')}ppm, "
-                f"T={data.get('temperature', '?')}C, "
-                f"H={data.get('humidity', '?')}%"
-            )
+            if msg.topic == self.topic_config:
+                self._apply_config(payload)
+            elif msg.topic == self.topic_commands:
+                self._execute_command(payload)
 
         except Exception as e:
-            print(f"[{datetime.now():%H:%M:%S}] Error: {e}")
+            print(f"Error processing message: {e}")
 
-    def run(self):
-        """Main loop - connect and send telemetry."""
-        print("=" * 50)
-        print("CO2 Monitor Device")
-        print("=" * 50)
-        print(f"Device UID: {self.device_uid}")
-        print(f"Local IP: {self.local_ip}")
-        print(f"Broker: {CONFIG['MQTT_BROKER']}:{CONFIG['MQTT_PORT']}")
-        print(f"Send interval: {CONFIG['SEND_INTERVAL']}s")
-        print("=" * 50)
-        print()
+    def _apply_config(self, new_config: dict):
+        """Apply new configuration from server."""
+        if "send_interval" in new_config:
+            self.config["send_interval"] = new_config["send_interval"]
+            print(f"Send interval updated to {self.config['send_interval']}s")
 
-        self.connect()
+            # Save to config file
+            try:
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(self.config, f, indent=2)
+            except Exception:
+                pass
 
-        # Wait for connection
-        for i in range(10):
-            if self.connected:
-                break
-            time.sleep(1)
-            print(f"Waiting for connection... ({i+1}/10)")
+    def _execute_command(self, command: dict):
+        """Execute command from server."""
+        cmd = command.get("command", "")
 
-        if not self.connected:
-            print("Failed to connect after 10 seconds")
-            return
+        if cmd == "restart":
+            print("Restart command received")
+            self.running = False
 
-        # Main loop
-        print("\nStarting telemetry loop (Ctrl+C to stop)...\n")
+        elif cmd == "force_update":
+            print("Force update command received")
+            self._force_update_requested = True
+            self.running = False
+
+        elif cmd == "status":
+            # Send immediate status
+            self._send_telemetry()
+
+    def _send_telemetry(self) -> bool:
+        """Send sensor data to server and update display."""
+        data = self.sensor.read()
+        if data is None:
+            return False
+
+        # Update display with current readings
+        if self.display:
+            self.display.show(data["co2"], data["temperature"], data["humidity"])
+
+        payload = {
+            "device_uid": self.device_uid,
+            "co2": data["co2"],
+            "temperature": data["temperature"],
+            "humidity": data["humidity"],
+            "timestamp": datetime.utcnow().isoformat(),
+            "ip": self.local_ip,
+            "firmware_version": self.version,
+            "uptime": int(time.time() - self.start_time),
+        }
 
         try:
-            while True:
-                if self.connected:
-                    self.send_telemetry()
-                else:
-                    print("Not connected, attempting reconnect...")
-                    try:
-                        self.client.reconnect()
-                    except Exception:
-                        pass
+            self.client.publish(self.topic_telemetry, json.dumps(payload), qos=1)
+            print(
+                f"[{datetime.now():%H:%M:%S}] "
+                f"CO2={data['co2']}ppm T={data['temperature']}C H={data['humidity']}%"
+            )
+            return True
+        except Exception as e:
+            print(f"Failed to send telemetry: {e}")
+            return False
 
-                time.sleep(CONFIG["SEND_INTERVAL"])
+    def connect(self) -> bool:
+        """Connect to MQTT broker."""
+        try:
+            print(f"Connecting to {self.config['mqtt_broker']}:{self.config['mqtt_port']}...")
+            self.client.connect(
+                self.config["mqtt_broker"],
+                self.config["mqtt_port"],
+                keepalive=60,
+            )
+            self.client.loop_start()
+
+            # Wait for connection
+            for _ in range(10):
+                if self.connected:
+                    return True
+                time.sleep(1)
+
+            return self.connected
+        except Exception as e:
+            print(f"Connection error: {e}")
+            return False
+
+    def run(self):
+        """Main telemetry loop."""
+        if not self.connect():
+            print("Failed to connect to MQTT broker")
+            return
+
+        self.running = True
+        last_send = 0
+
+        try:
+            while self.running:
+                now = time.time()
+
+                # Send telemetry at interval
+                if now - last_send >= self.config["send_interval"]:
+                    if self.connected:
+                        self._send_telemetry()
+                    else:
+                        print("Not connected, attempting reconnect...")
+                        try:
+                            self.client.reconnect()
+                        except Exception:
+                            pass
+
+                    last_send = now
+
+                time.sleep(1)
 
         except KeyboardInterrupt:
-            print("\nShutting down...")
-
+            print("\nStopping...")
         finally:
+            self.client.publish(self.topic_status, "offline", retain=True)
             self.client.loop_stop()
             self.client.disconnect()
-            print("Goodbye!")
+
+        # Return whether force update was requested
+        return self._force_update_requested
+
+    def stop(self):
+        """Stop the client."""
+        self.running = False
+
+
+# ==================== HEALTH CHECK ====================
+
+def run_health_check(sensor: SCD41Sensor, config: dict) -> bool:
+    """
+    Run health check for bootstrap validation.
+    Creates .health_ok file if everything works.
+    """
+    print("Running health check...")
+
+    # 1. Check sensor initialization
+    if not sensor.init():
+        print("Health check FAILED: Sensor init failed")
+        return False
+
+    # 2. Try to read sensor
+    time.sleep(5)  # Wait for sensor
+    reading = sensor.read()
+    if reading is None:
+        # Try once more
+        time.sleep(5)
+        reading = sensor.read()
+
+    if reading is None:
+        print("Health check FAILED: Cannot read sensor")
+        return False
+
+    print(f"Health check: Sensor OK - CO2={reading['co2']}ppm")
+
+    # 3. Check MQTT connectivity
+    try:
+        import paho.mqtt.client as mqtt
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+
+        connected = False
+
+        def on_connect(c, u, f, rc, p):
+            nonlocal connected
+            connected = rc == 0
+
+        client.on_connect = on_connect
+        client.connect(config["mqtt_broker"], config["mqtt_port"], keepalive=10)
+        client.loop_start()
+
+        for _ in range(5):
+            if connected:
+                break
+            time.sleep(1)
+
+        client.loop_stop()
+        client.disconnect()
+
+        if not connected:
+            print("Health check FAILED: Cannot connect to MQTT")
+            return False
+
+        print("Health check: MQTT OK")
+
+    except Exception as e:
+        print(f"Health check FAILED: MQTT error - {e}")
+        return False
+
+    # 4. All checks passed - create health file
+    try:
+        HEALTH_FILE.write_text(datetime.utcnow().isoformat())
+        print("Health check PASSED")
+        return True
+    except Exception as e:
+        print(f"Health check FAILED: Cannot write health file - {e}")
+        return False
 
 
 # ==================== MAIN ====================
 
-def create_sensor():
-    """Create sensor instance based on config."""
-    if CONFIG["DEMO_MODE"]:
-        print("Running in DEMO mode (fake sensor data)")
-        return DemoSensor()
-
-    sensors = []
-
-    # Try to initialize MH-Z19 (CO2)
-    try:
-        mhz19 = MHZ19Sensor()
-        sensors.append(mhz19)
-        print("Initialized MH-Z19 CO2 sensor")
-    except Exception as e:
-        print(f"MH-Z19 not available: {e}")
-
-    # Try to initialize DHT22 (Temperature, Humidity)
-    try:
-        dht22 = DHT22Sensor(gpio_pin=4)
-        sensors.append(dht22)
-        print("Initialized DHT22 sensor")
-    except Exception as e:
-        print(f"DHT22 not available: {e}")
-
-    if not sensors:
-        print("No sensors available! Running in demo mode.")
-        return DemoSensor()
-
-    return CombinedSensor(sensors)
-
-
 def main():
-    """Entry point."""
-    sensor = create_sensor()
-    client = CO2DeviceClient(sensor)
-    client.run()
+    """Main entry point."""
+    config = load_config()
+    version = get_version()
+
+    print("=" * 50)
+    print(f"CO2 Monitor v{version}")
+    print("=" * 50)
+    print(f"Device UID: {get_device_uid(config)}")
+    print(f"MQTT: {config['mqtt_broker']}:{config['mqtt_port']}")
+    print(f"Interval: {config['send_interval']}s")
+    print("=" * 50)
+
+    # Check if running in health check mode
+    if "--health-check" in sys.argv:
+        sensor = SCD41Sensor()
+        success = run_health_check(sensor, config)
+        sensor.stop()
+        sys.exit(0 if success else 1)
+
+    # Initialize display (optional - continues without if not available)
+    display = Display()
+    display.init()
+    display.show_status("Starting...")
+
+    # Initialize sensor
+    sensor = SCD41Sensor()
+    if not sensor.init():
+        print("ERROR: Sensor init failed! Check I2C connection.")
+        print("Device will not send data until sensor is working.")
+        display.show_status("Sensor ERROR!")
+
+    display.show_status("Connecting...")
+
+    # Create MQTT client with sensor and display
+    client = CO2MQTTClient(config, sensor, display)
+
+    # Handle signals for graceful shutdown
+    def signal_handler(sig, frame):
+        print("\nShutdown signal received")
+        client.stop()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Run main loop
+    force_update = client.run()
+
+    # Cleanup
+    sensor.stop()
+    display.clear()
+
+    # If force update was requested, exit with special code
+    if force_update:
+        print("Force update requested, restarting bootstrap...")
+        # Remove version file to force re-download
+        VERSION_FILE.unlink(missing_ok=True)
+        sys.exit(100)  # Special exit code for bootstrap
+
+    print("Goodbye!")
 
 
 if __name__ == "__main__":

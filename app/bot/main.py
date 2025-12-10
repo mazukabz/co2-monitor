@@ -1503,6 +1503,10 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
                     InlineKeyboardButton(text="120с", callback_data=f"admin:interval:{device_id}:120"),
                     InlineKeyboardButton(text="300с", callback_data=f"admin:interval:{device_id}:300"),
                 ],
+                [
+                    InlineKeyboardButton(text="🔄 Force Update", callback_data=f"admin:force_update:{device_id}"),
+                    InlineKeyboardButton(text="🔃 Restart", callback_data=f"admin:restart:{device_id}"),
+                ],
                 [InlineKeyboardButton(text="◀️ К списку", callback_data="admin:devices")],
             ])
 
@@ -1536,6 +1540,66 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
             else:
                 await callback.message.answer(
                     f"⚠️ Интервал сохранён, но устройство offline",
+                    reply_markup=get_main_keyboard()
+                )
+
+    elif action == "force_update":
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            from app.mqtt.main import publish_device_command
+            success = publish_device_command(device.device_uid, "force_update")
+
+            if success:
+                await callback.message.answer(
+                    f"🔄 <b>Команда Force Update отправлена</b>\n\n"
+                    f"📱 {device.name or device.device_uid}\n\n"
+                    f"Устройство перезапустится и загрузит последнюю версию прошивки с сервера.",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await callback.message.answer(
+                    f"⚠️ Не удалось отправить команду. Устройство offline.",
+                    reply_markup=get_main_keyboard()
+                )
+
+    elif action == "restart":
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            from app.mqtt.main import publish_device_command
+            success = publish_device_command(device.device_uid, "restart")
+
+            if success:
+                await callback.message.answer(
+                    f"🔃 <b>Команда Restart отправлена</b>\n\n"
+                    f"📱 {device.name or device.device_uid}\n\n"
+                    f"Устройство перезапустится.",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await callback.message.answer(
+                    f"⚠️ Не удалось отправить команду. Устройство offline.",
                     reply_markup=get_main_keyboard()
                 )
 
