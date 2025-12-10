@@ -178,7 +178,9 @@ async def get_or_create_user(telegram_user) -> User:
 
 def get_co2_emoji(co2: int) -> str:
     """Get emoji for CO2 level."""
-    if co2 < 800:
+    if co2 < 600:
+        return "💚"
+    elif co2 < 800:
         return "🟢"
     elif co2 < 1000:
         return "🟡"
@@ -189,12 +191,14 @@ def get_co2_emoji(co2: int) -> str:
 
 def get_co2_status(co2: int) -> str:
     """Get status text for CO2 level."""
-    if co2 < 800:
+    if co2 < 600:
         return "Отлично"
-    elif co2 < 1000:
+    elif co2 < 800:
         return "Хорошо"
+    elif co2 < 1000:
+        return "Норма"
     elif co2 < 1500:
-        return "Проветрите"
+        return "Плохо"
     return "Критично"
 
 
@@ -607,13 +611,14 @@ async def cmd_help(message: Message):
         "/bind — привязать устройство\n"
         "/settings — настройки\n\n"
         "<b>🚦 Уровни CO2:</b>\n"
-        "🟢 &lt;800 ppm — Отлично\n"
-        "🟡 800-1000 ppm — Хорошо\n"
-        "🟠 1000-1500 ppm — Проветрите\n"
+        "💚 &lt;600 ppm — Отлично\n"
+        "🟢 600-800 ppm — Хорошо\n"
+        "🟡 800-1000 ppm — Норма\n"
+        "🟠 1000-1500 ppm — Плохо\n"
         "🔴 &gt;1500 ppm — Критично\n\n"
         "<b>💡 Советы:</b>\n"
-        "• Проветривайте при CO2 &gt;1000\n"
-        "• Для сна оптимально &lt;800\n"
+        "• Проветривайте при CO2 &gt;800\n"
+        "• Для сна оптимально &lt;600\n"
         "• Настройте автоотчёты в ⚙️"
     )
     await message.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())

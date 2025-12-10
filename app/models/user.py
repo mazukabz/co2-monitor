@@ -27,7 +27,7 @@ class User(Base):
 
     # Notification settings
     alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    alert_threshold: Mapped[int] = mapped_column(Integer, default=1000)  # CO2 ppm
+    alert_threshold: Mapped[int] = mapped_column(Integer, default=800)  # CO2 ppm (based on research)
 
     # Morning report settings (night summary)
     morning_report_enabled: Mapped[bool] = mapped_column(Boolean, default=True)

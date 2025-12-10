@@ -25,34 +25,39 @@ COLORS = {
     'bg_card': '#1C1C1E',        # Card background
     'text_primary': '#FFFFFF',   # Primary text
     'text_secondary': '#8E8E93', # Secondary text
-    'accent_green': '#34C759',   # Excellent - Apple green
-    'accent_yellow': '#FFD60A',  # Good - Apple yellow
-    'accent_orange': '#FF9F0A',  # Moderate - Apple orange
-    'accent_red': '#FF3B30',     # Bad - Apple red
+    'accent_green_dark': '#30D158',  # Excellent (<600) - darker green
+    'accent_green': '#34C759',   # Good (600-800) - Apple green
+    'accent_yellow': '#FFD60A',  # Normal (800-1000) - Apple yellow
+    'accent_orange': '#FF9F0A',  # Bad (1000-1500) - Apple orange
+    'accent_red': '#FF3B30',     # Critical (>1500) - Apple red
     'accent_blue': '#0A84FF',    # Info - Apple blue
     'accent_cyan': '#64D2FF',    # Secondary info
     'accent_purple': '#BF5AF2',  # Highlight
     'grid': '#38383A',           # Grid lines
 }
 
-# CO2 level thresholds and colors (Apple style)
+# CO2 level thresholds and colors (based on scientific research)
+# Sources: Harvard study, ASHRAE guidelines, 2023 meta-analysis
 CO2_LEVELS = {
-    'excellent': {'max': 800, 'color': COLORS['accent_green'], 'label': 'Отлично'},
-    'good': {'max': 1000, 'color': COLORS['accent_yellow'], 'label': 'Хорошо'},
-    'moderate': {'max': 1500, 'color': COLORS['accent_orange'], 'label': 'Проветрить'},
-    'bad': {'max': float('inf'), 'color': COLORS['accent_red'], 'label': 'Критично'},
+    'excellent': {'max': 600, 'color': COLORS['accent_green_dark'], 'label': 'Отлично'},
+    'good': {'max': 800, 'color': COLORS['accent_green'], 'label': 'Хорошо'},
+    'normal': {'max': 1000, 'color': COLORS['accent_yellow'], 'label': 'Норма'},
+    'bad': {'max': 1500, 'color': COLORS['accent_orange'], 'label': 'Плохо'},
+    'critical': {'max': float('inf'), 'color': COLORS['accent_red'], 'label': 'Критично'},
 }
 
 
 def get_co2_color(co2: int) -> str:
     """Get color for CO2 level."""
-    if co2 < 800:
+    if co2 < 600:
         return CO2_LEVELS['excellent']['color']
-    elif co2 < 1000:
+    elif co2 < 800:
         return CO2_LEVELS['good']['color']
+    elif co2 < 1000:
+        return CO2_LEVELS['normal']['color']
     elif co2 < 1500:
-        return CO2_LEVELS['moderate']['color']
-    return CO2_LEVELS['bad']['color']
+        return CO2_LEVELS['bad']['color']
+    return CO2_LEVELS['critical']['color']
 
 
 def generate_daily_chart(
@@ -103,11 +108,12 @@ def generate_daily_chart(
     # CO2 Chart (main)
     ax1.set_ylabel('CO2 (ppm)', fontsize=11)
 
-    # Fill areas by CO2 level
-    ax1.axhspan(0, 800, alpha=0.1, color=CO2_LEVELS['excellent']['color'], label='Отлично')
-    ax1.axhspan(800, 1000, alpha=0.1, color=CO2_LEVELS['good']['color'], label='Хорошо')
-    ax1.axhspan(1000, 1500, alpha=0.1, color=CO2_LEVELS['moderate']['color'], label='Проветрить')
-    ax1.axhspan(1500, max(co2_values) + 200 if co2_values else 2000, alpha=0.1, color=CO2_LEVELS['bad']['color'], label='Критично')
+    # Fill areas by CO2 level (5 zones based on scientific research)
+    ax1.axhspan(0, 600, alpha=0.1, color=CO2_LEVELS['excellent']['color'], label='Отлично')
+    ax1.axhspan(600, 800, alpha=0.1, color=CO2_LEVELS['good']['color'], label='Хорошо')
+    ax1.axhspan(800, 1000, alpha=0.1, color=CO2_LEVELS['normal']['color'], label='Норма')
+    ax1.axhspan(1000, 1500, alpha=0.1, color=CO2_LEVELS['bad']['color'], label='Плохо')
+    ax1.axhspan(1500, max(co2_values) + 200 if co2_values else 2000, alpha=0.1, color=CO2_LEVELS['critical']['color'], label='Критично')
 
     # Plot CO2 line with gradient color
     colors = [get_co2_color(c) for c in co2_values]
@@ -115,9 +121,10 @@ def generate_daily_chart(
         ax1.plot(times[i:i+2], co2_values[i:i+2], color=colors[i], linewidth=2)
 
     # Add threshold lines
-    ax1.axhline(y=800, color=CO2_LEVELS['good']['color'], linestyle='--', alpha=0.7, linewidth=1)
-    ax1.axhline(y=1000, color=CO2_LEVELS['moderate']['color'], linestyle='--', alpha=0.7, linewidth=1)
-    ax1.axhline(y=1500, color=CO2_LEVELS['bad']['color'], linestyle='--', alpha=0.7, linewidth=1)
+    ax1.axhline(y=600, color=CO2_LEVELS['good']['color'], linestyle='--', alpha=0.5, linewidth=1)
+    ax1.axhline(y=800, color=CO2_LEVELS['normal']['color'], linestyle='--', alpha=0.7, linewidth=1)
+    ax1.axhline(y=1000, color=CO2_LEVELS['bad']['color'], linestyle='--', alpha=0.7, linewidth=1)
+    ax1.axhline(y=1500, color=CO2_LEVELS['critical']['color'], linestyle='--', alpha=0.7, linewidth=1)
 
     ax1.set_ylim(min(300, min(co2_values) - 50) if co2_values else 300,
                  max(1800, max(co2_values) + 100) if co2_values else 1800)
@@ -277,8 +284,10 @@ def generate_weekly_summary(
     bars2 = ax.bar(x, avg_co2, width, label='Среднее', color='#3b82f6', alpha=0.8)
     bars3 = ax.bar([i + width for i in x], max_co2, width, label='Максимум', color='#ef4444', alpha=0.8)
 
-    # Threshold line
-    ax.axhline(y=1000, color='#f97316', linestyle='--', label='Порог (1000 ppm)')
+    # Threshold lines (based on scientific research)
+    ax.axhline(y=600, color=COLORS['accent_green'], linestyle='--', alpha=0.5, label='Отлично (600 ppm)')
+    ax.axhline(y=800, color=COLORS['accent_yellow'], linestyle='--', alpha=0.7, label='Хорошо (800 ppm)')
+    ax.axhline(y=1000, color=COLORS['accent_orange'], linestyle='--', alpha=0.7, label='Норма (1000 ppm)')
 
     ax.set_ylabel('CO2 (ppm)')
     ax.set_title(f'📅 Недельная статистика — {device_name}', fontsize=14, fontweight='bold')
@@ -580,12 +589,14 @@ def generate_period_report(
     temp_min, temp_max = min(temp_values), max(temp_values)
     hum_min, hum_max = min(humidity_values), max(humidity_values)
 
-    # Time in zones (from raw data)
+    # Time in zones (from raw data) - 5 zones based on scientific research
     n = len(co2_values)
-    time_excellent = sum(1 for c in co2_values if c < 800) / n * 100
-    time_good = sum(1 for c in co2_values if 800 <= c < 1000) / n * 100
-    time_moderate = sum(1 for c in co2_values if 1000 <= c < 1500) / n * 100
-    time_bad = sum(1 for c in co2_values if c >= 1500) / n * 100
+    time_excellent = sum(1 for c in co2_values if c < 600) / n * 100
+    time_good = sum(1 for c in co2_values if 600 <= c < 800) / n * 100
+    time_normal = sum(1 for c in co2_values if 800 <= c < 1000) / n * 100
+    time_bad = sum(1 for c in co2_values if 1000 <= c < 1500) / n * 100
+    time_critical = sum(1 for c in co2_values if c >= 1500) / n * 100
+    time_above_800 = sum(1 for c in co2_values if c > 800) / n * 100
     time_above_1000 = sum(1 for c in co2_values if c > 1000) / n * 100
 
     # Quality color based on average
@@ -596,17 +607,19 @@ def generate_period_report(
     change_sign = '+' if co2_change >= 0 else ''
     change_color = COLORS['accent_red'] if co2_change > 0 else COLORS['accent_green']
 
-    # Sleep quality for morning report
+    # Sleep quality for morning report (updated thresholds based on research)
     sleep_quality = None
     if report_type == "morning":
-        if avg_co2 < 800 and time_above_1000 < 10:
-            sleep_quality = ("Отлично", COLORS['accent_green'])
+        if avg_co2 < 600 and time_above_800 < 10:
+            sleep_quality = ("Отлично", COLORS['accent_green_dark'])
+        elif avg_co2 < 800 and time_above_1000 < 10:
+            sleep_quality = ("Хорошо", COLORS['accent_green'])
         elif avg_co2 < 1000 and time_above_1000 < 30:
-            sleep_quality = ("Хорошо", COLORS['accent_yellow'])
+            sleep_quality = ("Норма", COLORS['accent_yellow'])
         elif avg_co2 < 1200:
-            sleep_quality = ("Удовлетворительно", COLORS['accent_orange'])
+            sleep_quality = ("Плохо", COLORS['accent_orange'])
         else:
-            sleep_quality = ("Плохо", COLORS['accent_red'])
+            sleep_quality = ("Критично", COLORS['accent_red'])
 
     # Smooth data with period-appropriate smoothing for Apple Stocks-style curves
     chart_times, chart_co2 = _smooth_for_period(times, co2_values, period_hours)

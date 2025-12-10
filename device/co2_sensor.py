@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CO2 Monitor - Main Device Script v2.2.0
+CO2 Monitor - Main Device Script v2.3.0
 
 This script is updated via OTA from server.
 It reads SCD41 sensor data and sends to MQTT broker.
@@ -13,7 +13,7 @@ Features:
 - Smart polling: display every 5s, MQTT at send_interval
 - Live mode: high-frequency telemetry (5s) for specified duration
 - Display control: enable/disable OLED via MQTT command
-- Display shows SENSOR ERROR if no data available
+- Smart display caching: avoids flickering when sensor temporarily not ready (15s cache)
 - Manual CO2 calibration via MQTT command (force_calibration to 420 ppm)
 """
 
@@ -416,7 +416,11 @@ class CO2MQTTClient:
         # Display and live mode state
         self._display_enabled = config.get("display_enabled", True)
         self._live_mode_until = 0  # Unix timestamp when live mode ends (0 = disabled)
-        self._last_reading = None  # Cache last sensor reading
+
+        # Cache for display (to avoid flickering when sensor temporarily not ready)
+        self._cached_reading = None  # Last successful sensor reading
+        self._cached_reading_time = 0  # Timestamp of last successful reading
+        self._cache_max_age = 15  # Cache valid for 15 seconds (3 sensor cycles)
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         """Handle MQTT connection."""
@@ -579,6 +583,35 @@ class CO2MQTTClient:
             except Exception:
                 pass
 
+    def _get_display_data(self, fresh_reading: dict | None) -> dict | None:
+        """
+        Get data for display with smart caching.
+
+        Logic:
+        - If fresh_reading available: use it and update cache
+        - If no fresh_reading but cache < 15s: use cache (avoid flickering)
+        - If no fresh_reading and cache > 15s: return None (sensor error)
+
+        Returns data dict or None if sensor is truly unavailable.
+        """
+        now = time.time()
+
+        if fresh_reading is not None:
+            # Update cache with fresh data
+            self._cached_reading = fresh_reading
+            self._cached_reading_time = now
+            return fresh_reading
+
+        # No fresh reading - check cache validity
+        if self._cached_reading is not None:
+            cache_age = now - self._cached_reading_time
+            if cache_age <= self._cache_max_age:
+                # Cache still valid - use it to avoid display flickering
+                return self._cached_reading
+
+        # Cache expired or no cache - sensor is truly unavailable
+        return None
+
     def _update_display(self, data: dict):
         """Update display with sensor data."""
         if not self._display_enabled or not self.display:
@@ -697,21 +730,21 @@ class CO2MQTTClient:
                     # Read sensor once
                     reading = self.sensor.read()
 
-                    if reading:
-                        # Update display if needed
-                        if need_display_update:
-                            self._update_display(reading)
-                            last_display_update = now
+                    # Update display if needed (with smart caching)
+                    if need_display_update:
+                        display_data = self._get_display_data(reading)
+                        if display_data:
+                            self._update_display(display_data)
+                        else:
+                            # Cache expired and no fresh data - sensor truly unavailable
+                            if self._display_enabled and self.display:
+                                self.display.show_status("SENSOR ERROR")
+                        last_display_update = now
 
-                        # Send MQTT if needed
-                        if need_mqtt_send:
-                            self._send_telemetry(reading)
-                            last_mqtt_send = now
-                    else:
-                        # Sensor returned no data - show error on display
-                        if need_display_update and self._display_enabled and self.display:
-                            self.display.show_status("SENSOR ERROR")
-                            last_display_update = now
+                    # Send MQTT only with fresh data (never cached)
+                    if need_mqtt_send and reading:
+                        self._send_telemetry(reading)
+                        last_mqtt_send = now
 
                 # Sleep briefly to avoid busy loop
                 time.sleep(0.5)

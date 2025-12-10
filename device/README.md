@@ -1,4 +1,4 @@
-# CO2 Monitor - Device Firmware v2.0.0
+# CO2 Monitor - Device Firmware v2.3.0
 
 ## Архитектура
 
