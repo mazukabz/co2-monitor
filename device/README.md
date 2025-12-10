@@ -1,62 +1,131 @@
-# CO2 Monitor - Device Firmware
+# CO2 Monitor - Device Firmware v2.0.0
 
-This folder contains the device firmware (`co2_sensor.py`) which is served to devices by the API server.
+## Архитектура
 
-## Installation on Raspberry Pi
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Raspberry Pi                              │
+├─────────────────────────────────────────────────────────────┤
+│  systemd service (co2-monitor)                              │
+│       │                                                      │
+│       ▼                                                      │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐   │
+│  │ bootstrap.py│────▶│   main.py   │────▶│   SCD41     │   │
+│  │ (immutable) │     │ (updatable) │     │  (sensor)   │   │
+│  └─────────────┘     └─────────────┘     └─────────────┘   │
+│       │                    │                                 │
+│       ▼                    ▼                                 │
+│  ┌─────────────┐     ┌─────────────┐                        │
+│  │   Server    │     │   SSD1306   │                        │
+│  │ /api/device │     │  (display)  │                        │
+│  └─────────────┘     └─────────────┘                        │
+└─────────────────────────────────────────────────────────────┘
+```
 
-One command:
+## Установка
+
+### Новая установка (одна команда)
+
 ```bash
 curl -sL http://31.59.170.64:10900/install.py | python3
+sudo bash ~/co2-monitor/install_service.sh
 ```
 
-This downloads and installs everything automatically.
+### Что устанавливается
 
-## What Gets Installed
-
-The server packages everything into a tar.gz:
-- `main.py` - Main device script (this co2_sensor.py)
-- `config.json` - MQTT broker settings
-- `version.json` - Firmware version info
-- `requirements.txt` - Python dependencies
-- `update.py` - Check for updates
-- `install_service.sh` - Systemd service installer
-
-## Configuration
-
-After installation, edit `~/co2-monitor/config.json` or set environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MQTT_BROKER` | 31.59.170.64 | Server IP address |
-| `MQTT_PORT` | 10883 | MQTT port |
-| `DEVICE_UID` | auto-generated | Unique device ID |
-| `DEVICE_NAME` | empty | Friendly name for bot |
-| `SEND_INTERVAL` | 60 | Seconds between readings |
-| `DEMO_MODE` | false | Use fake sensor data |
-
-### Remote Configuration via MQTT
-
-The device subscribes to `devices/{DEVICE_UID}/config` topic and automatically applies settings:
-
-```json
-{"send_interval": 30}
+```
+~/co2-monitor/
+├── bootstrap.py       # OTA loader (не обновляется)
+├── main.py           # Основной код (обновляется OTA)
+├── config.json       # Настройки MQTT
+├── version.json      # Версия прошивки
+├── requirements.txt  # Python зависимости
+├── venv/             # Virtual environment
+├── backup/           # Предыдущая версия (для rollback)
+└── .health_ok        # Маркер успешной инициализации
 ```
 
-Admin can change interval via Telegram bot: `/admin` → Управление устройствами → выбрать устройство → выбрать интервал.
+## OTA-обновления
 
-Settings are pushed immediately via MQTT and also saved in database (applied on next connect if device was offline).
+### Автоматические обновления
 
-## Hardware Setup
+Bootstrap проверяет сервер при каждом запуске:
+1. Запрашивает `/api/device/manifest`
+2. Сравнивает hash/date/version
+3. При наличии обновления:
+   - Создаёт backup
+   - Скачивает новую версию
+   - Проверяет hash
+   - Запускает health check
+   - При ошибке — откат на backup
 
-### Supported Sensors
+### Принудительное обновление
 
-| Sensor | Type | Connection |
-|--------|------|------------|
-| MH-Z19 | CO2 | UART (GPIO 14/15) |
-| DHT22 / AM2302 | Temp + Humidity | GPIO 4 |
+Через Telegram бот: **Админ → ⚙️ Force Update**
+
+Или на устройстве:
+```bash
+rm ~/co2-monitor/version.json
+sudo systemctl restart co2-monitor
+```
+
+### Exit codes
+
+| Код | Значение | Действие bootstrap |
+|-----|----------|-------------------|
+| 0 | Нормальный выход | Остановить сервис |
+| 100 | Force update | Перезапустить и проверить обновления |
+| другой | Ошибка | Подождать 30 сек и перезапустить |
+
+## Оборудование
+
+### Поддерживаемые датчики
+
+| Датчик | Данные | Подключение |
+|--------|--------|-------------|
+| **SCD41** (рекомендуется) | CO2 + Temp + Humidity | I2C |
+| MH-Z19 | CO2 | UART |
+| DHT22 / AM2302 | Temp + Humidity | GPIO |
 | BME280 | Temp + Humidity + Pressure | I2C |
 
-### Wiring MH-Z19 (CO2)
+### Подключение SCD41 (I2C)
+
+```
+SCD41       Raspberry Pi
+-----       ------------
+VCC    ->   3.3V (pin 1)
+GND    ->   GND (pin 9)
+SDA    ->   GPIO2/SDA (pin 3)
+SCL    ->   GPIO3/SCL (pin 5)
+```
+
+Включить I2C:
+```bash
+sudo raspi-config
+# Interface Options -> I2C -> Yes
+sudo reboot
+```
+
+Проверить подключение:
+```bash
+i2cdetect -y 1
+# Должен показать адрес 0x62
+```
+
+### Подключение SSD1306 дисплея (I2C)
+
+```
+SSD1306     Raspberry Pi
+-------     ------------
+VCC    ->   3.3V (pin 1)
+GND    ->   GND (pin 9)
+SDA    ->   GPIO2/SDA (pin 3)
+SCL    ->   GPIO3/SCL (pin 5)
+```
+
+Адрес: 0x3C (обычно) или 0x3D
+
+### Подключение MH-Z19 (UART)
 
 ```
 MH-Z19      Raspberry Pi
@@ -67,82 +136,129 @@ TX     ->   GPIO15/RXD (pin 10)
 RX     ->   GPIO14/TXD (pin 8)
 ```
 
-Enable UART on Raspberry Pi:
+Включить UART:
 ```bash
 sudo raspi-config
 # Interface Options -> Serial Port -> No (login shell) -> Yes (hardware)
 sudo reboot
 ```
 
-### Wiring DHT22 (Temperature + Humidity)
+## Конфигурация
 
+### config.json
+
+```json
+{
+  "mqtt_broker": "31.59.170.64",
+  "mqtt_port": 10883,
+  "send_interval": 60,
+  "device_uid": "auto-generated",
+  "device_name": ""
+}
 ```
-DHT22       Raspberry Pi
------       ------------
-VCC    ->   3.3V (pin 1)
-DATA   ->   GPIO4 (pin 7)
-GND    ->   GND (pin 9)
+
+### Удалённая настройка через MQTT
+
+Устройство подписано на `devices/{DEVICE_UID}/config`:
+
+```json
+{"send_interval": 30}
 ```
 
-Add 10K pull-up resistor between VCC and DATA.
+Команды через `devices/{DEVICE_UID}/command`:
+- `{"command": "force_update"}` — перезапустить с проверкой обновлений
+- `{"command": "restart"}` — просто перезапустить
 
-## Auto-Start as Service
+## Управление сервисом
 
-After installation:
 ```bash
-cd ~/co2-monitor
-sudo bash install_service.sh
-```
-
-Check status:
-```bash
+# Статус
 sudo systemctl status co2-monitor
+
+# Логи (realtime)
 journalctl -u co2-monitor -f
-```
 
-## Updates
+# Логи (последние 50 строк)
+journalctl -u co2-monitor -n 50
 
-Check for updates:
-```bash
-cd ~/co2-monitor
-python3 update.py
-```
-
-If update available, re-run install:
-```bash
-curl -sL http://31.59.170.64:10900/install.py | python3
+# Перезапуск
 sudo systemctl restart co2-monitor
+
+# Остановка
+sudo systemctl stop co2-monitor
 ```
-
-## Device Binding
-
-After first telemetry is sent:
-1. Device appears in database with activation code
-2. Admin can view code in database or logs
-3. User enters code in Telegram bot via `/bind` command
 
 ## Troubleshooting
 
-### UART not working
-```bash
-# Check if serial is enabled
-ls -la /dev/serial0
+### Устройство показывает старую версию
 
-# Test MH-Z19
-python3 -c "from co2_sensor import MHZ19Sensor; print(MHZ19Sensor().read())"
+```bash
+cat ~/co2-monitor/version.json
+# Если версия старая:
+rm ~/co2-monitor/version.json
+sudo systemctl restart co2-monitor
 ```
 
-### DHT22 not working
-```bash
-# Install GPIO library
-sudo apt-get install libgpiod2
+### Health check failed
 
-# Test DHT22
-python3 -c "from co2_sensor import DHT22Sensor; print(DHT22Sensor().read())"
+```bash
+journalctl -u co2-monitor -n 50
+
+# "No backup available" — нормально при первой установке
+# При ошибках в коде — main.py не создаёт .health_ok
 ```
 
-### Connection issues
+### Датчик не инициализируется
+
 ```bash
-# Test MQTT connection
-mosquitto_pub -h 31.59.170.64 -p 10883 -t test -m "hello"
+# Проверить I2C
+i2cdetect -y 1
+
+# Должны быть адреса:
+# 0x62 — SCD41
+# 0x3C — SSD1306
 ```
+
+### MQTT не подключается
+
+```bash
+# Проверить конфиг
+cat ~/co2-monitor/config.json
+
+# Проверить соединение с сервером
+curl http://31.59.170.64:10900/health
+```
+
+### Полная переустановка
+
+```bash
+sudo systemctl stop co2-monitor
+rm -rf ~/co2-monitor
+curl -sL http://31.59.170.64:10900/install.py | python3
+sudo bash ~/co2-monitor/install_service.sh
+```
+
+## Файлы
+
+| Файл | Описание | Обновляется OTA |
+|------|----------|-----------------|
+| `bootstrap.py` | OTA loader, health check, rollback | ❌ Никогда |
+| `main.py` | Основная логика, датчики, MQTT | ✅ Да |
+| `config.json` | Настройки MQTT | ✅ Да |
+| `version.json` | Версия прошивки | ✅ Да |
+| `install_service.sh` | Установка systemd | ❌ Только при переустановке |
+
+## Зависимости
+
+```
+paho-mqtt>=2.0.0
+adafruit-circuitpython-scd4x
+adafruit-circuitpython-ssd1306
+```
+
+## Привязка к пользователю
+
+1. После первой отправки данных устройство появляется в БД
+2. Генерируется 8-символьный код активации
+3. Пользователь вводит код в боте: `/bind XXXXXXXX`
+4. Устройство привязывается к Telegram аккаунту

@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "2.0.0"
+FIRMWARE_VERSION = "2.0.1"
 FIRMWARE_DATE = "2025-12-10"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Real SCD41 sensor support, OTA bootstrap, health checks, validation"
+FIRMWARE_CHANGELOG = "Fix SSD1306 display font (adafruit-circuitpython-framebuf)"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")
@@ -104,7 +104,7 @@ except Exception as e:
     print(f"Warning: Could not download service installer: {{e}}")
 
 # Create minimal requirements.txt
-requirements = "paho-mqtt>=2.0.0\\nadafruit-circuitpython-scd4x\\nadafruit-circuitpython-ssd1306\\n"
+requirements = "paho-mqtt>=2.0.0\\nadafruit-circuitpython-scd4x\\nadafruit-circuitpython-ssd1306\\nadafruit-circuitpython-framebuf\\n"
 with open(os.path.join(INSTALL_DIR, "requirements.txt"), "w") as f:
     f.write(requirements)
 
@@ -158,7 +158,7 @@ async def get_device_package():
         tar.addfile(version_info, io.BytesIO(version_data))
 
         # 4. Requirements
-        requirements = b"paho-mqtt>=2.0.0\nadafruit-circuitpython-scd4x\nadafruit-circuitpython-ssd1306\n"
+        requirements = b"paho-mqtt>=2.0.0\nadafruit-circuitpython-scd4x\nadafruit-circuitpython-ssd1306\nadafruit-circuitpython-framebuf\n"
         req_info = tarfile.TarInfo(name="requirements.txt")
         req_info.size = len(requirements)
         tar.addfile(req_info, io.BytesIO(requirements))

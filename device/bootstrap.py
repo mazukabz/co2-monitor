@@ -306,7 +306,7 @@ def install_dependencies():
     if not req_file.exists():
         # Create minimal requirements
         with open(req_file, "w") as f:
-            f.write("paho-mqtt>=2.0.0\nadafruit-circuitpython-scd4x\nadafruit-circuitpython-ssd1306\n")
+            f.write("paho-mqtt>=2.0.0\nadafruit-circuitpython-scd4x\nadafruit-circuitpython-ssd1306\nadafruit-circuitpython-framebuf\n")
 
     try:
         log("Installing dependencies...")
