@@ -286,7 +286,22 @@ def ensure_font_file() -> bool:
 
 
 class Display:
-    """SSD1306 OLED Display (128x64) via I2C."""
+    """SSD1306 OLED Display (128x64) via I2C with big digit support."""
+
+    # Compact 5x7 digit font as bytes (each byte = 1 row, bits = pixels)
+    # Bit order: b5 b4 b3 b2 b1 (5 pixels wide)
+    FONT = {
+        '0': (0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E),
+        '1': (0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E),
+        '2': (0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F),
+        '3': (0x1F, 0x01, 0x02, 0x06, 0x01, 0x11, 0x0E),
+        '4': (0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02),
+        '5': (0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E),
+        '6': (0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E),
+        '7': (0x1F, 0x01, 0x02, 0x04, 0x04, 0x04, 0x04),
+        '8': (0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E),
+        '9': (0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C),
+    }
 
     def __init__(self):
         self.display = None
@@ -295,58 +310,58 @@ class Display:
     def init(self) -> bool:
         """Initialize SSD1306 OLED display."""
         try:
-            # Ensure font file exists (required for text display)
             ensure_font_file()
-
             import board
             import adafruit_ssd1306
-
             i2c = board.I2C()
             self.display = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c)
             self.display.fill(0)
             self.display.show()
-
             self.initialized = True
             print("Display initialized (SSD1306 128x64)")
             return True
-
         except ImportError as e:
             print(f"Display library not installed: {e}")
-            print("Install with: pip install adafruit-circuitpython-ssd1306")
             return False
         except Exception as e:
-            print(f"Display init error (continuing without display): {e}")
+            print(f"Display init error: {e}")
             return False
 
-    def show(self, co2: int, temp: float, humidity: float):
-        """Display sensor readings."""
-        if not self.initialized or self.display is None:
+    def big_text(self, text: str, x: int, y: int, scale: int = 4):
+        """Draw text with big scaled digits at (x, y)."""
+        if not self.display:
             return
+        for char in text:
+            if char in self.FONT:
+                for row_idx, row_byte in enumerate(self.FONT[char]):
+                    for bit in range(5):
+                        if row_byte & (0x10 >> bit):
+                            for dy in range(scale):
+                                for dx in range(scale):
+                                    px, py = x + bit * scale + dx, y + row_idx * scale + dy
+                                    if 0 <= px < 128 and 0 <= py < 64:
+                                        self.display.pixel(px, py, 1)
+                x += 6 * scale
+            elif char == ' ':
+                x += 3 * scale
 
+    def big_number(self, num: int, x: int = -1, y: int = 0, scale: int = 4):
+        """Draw number with big digits. x=-1 means center horizontally."""
+        text = str(num)
+        if x < 0:
+            x = (128 - len(text) * 6 * scale) // 2
+        self.big_text(text, x, y, scale)
+
+    def show(self, co2: int, temp: float, humidity: float):
+        """Display CO2 in big digits with temp/humidity below."""
+        if not self.initialized or not self.display:
+            return
         try:
             self.display.fill(0)
-
-            # CO2 level - large text at top
-            co2_text = f"CO2: {co2} ppm"
-            self.display.text(co2_text, 0, 0, 1)
-
-            # Status indicator based on CO2 level
-            if co2 < 800:
-                status = "Good"
-            elif co2 < 1000:
-                status = "OK"
-            elif co2 < 1500:
-                status = "Ventilate!"
-            else:
-                status = "CRITICAL!"
-            self.display.text(status, 0, 16, 1)
-
-            # Temperature and humidity
-            self.display.text(f"Temp: {temp:.1f} C", 0, 32, 1)
-            self.display.text(f"Hum:  {humidity:.0f} %", 0, 48, 1)
-
+            self.big_number(co2, y=2, scale=4)
+            self.display.text("ppm", 100, 34, 1)
+            self.display.text(f"{temp:.0f}C  {humidity:.0f}%", 0, 56, 1)
             self.display.show()
-
         except Exception as e:
             print(f"Display error: {e}")
 
