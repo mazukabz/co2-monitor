@@ -353,14 +353,16 @@ class Display:
         self.big_text(text, x, y, scale)
 
     def show(self, co2: int, temp: float, humidity: float):
-        """Display CO2 in big digits with temp/humidity below."""
+        """Display CO2 in huge adaptive digits centered on screen."""
         if not self.initialized or not self.display:
             return
         try:
             self.display.fill(0)
-            self.big_number(co2, y=2, scale=4)
-            self.display.text("ppm", 100, 34, 1)
-            self.display.text(f"{temp:.0f}C  {humidity:.0f}%", 0, 56, 1)
+            # Adaptive scale: 3 digits (400-999) = scale 7, 4+ digits = scale 5
+            scale = 7 if co2 < 1000 else 5
+            digit_h = 7 * scale  # 49px for scale=7, 35px for scale=5
+            y = (64 - digit_h) // 2  # Center vertically
+            self.big_number(co2, y=y, scale=scale)
             self.display.show()
         except Exception as e:
             print(f"Display error: {e}")
