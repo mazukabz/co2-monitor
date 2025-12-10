@@ -40,6 +40,7 @@ def get_mqtt_client() -> mqtt.Client | None:
 def publish_device_config(device_uid: str, config: dict) -> bool:
     """
     Publish configuration to a device.
+    Creates a temporary MQTT connection if no global client is available.
 
     Args:
         device_uid: Device unique identifier
@@ -48,26 +49,61 @@ def publish_device_config(device_uid: str, config: dict) -> bool:
     Returns:
         True if published successfully
     """
-    client = get_mqtt_client()
-    if not client or not client.is_connected():
-        print(f"⚠️ MQTT client not connected, cannot push config to {device_uid}")
-        return False
+    import time
 
     topic = f"devices/{device_uid}/config"
     payload = json.dumps(config)
 
-    result = client.publish(topic, payload, qos=1, retain=True)
-    if result.rc == mqtt.MQTT_ERR_SUCCESS:
-        print(f"📤 Config pushed to {device_uid}: {config}")
-        return True
-    else:
-        print(f"❌ Failed to push config to {device_uid}: {result.rc}")
+    # Try global client first (for mqtt processor)
+    client = get_mqtt_client()
+    if client and client.is_connected():
+        result = client.publish(topic, payload, qos=1, retain=True)
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            print(f"📤 Config pushed to {device_uid}: {config}")
+            return True
+        else:
+            print(f"❌ Failed to push config to {device_uid}: {result.rc}")
+            return False
+
+    # Create temporary connection (for bot/api which run in separate containers)
+    try:
+        temp_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        temp_client.connect(settings.mqtt_broker, settings.mqtt_port, keepalive=10)
+        temp_client.loop_start()
+
+        # Wait for connection (max 1 second)
+        for _ in range(10):
+            if temp_client.is_connected():
+                break
+            time.sleep(0.1)
+
+        if not temp_client.is_connected():
+            print(f"⚠️ Could not connect to MQTT broker")
+            temp_client.loop_stop()
+            return False
+
+        result = temp_client.publish(topic, payload, qos=1, retain=True)
+        result.wait_for_publish(timeout=5)
+
+        temp_client.loop_stop()
+        temp_client.disconnect()
+
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            print(f"📤 Config pushed to {device_uid}: {config} (via temp connection)")
+            return True
+        else:
+            print(f"❌ Failed to push config to {device_uid}: {result.rc}")
+            return False
+
+    except Exception as e:
+        print(f"❌ MQTT error pushing config to {device_uid}: {e}")
         return False
 
 
 def publish_device_command(device_uid: str, command: str) -> bool:
     """
     Publish command to a device.
+    Creates a temporary MQTT connection if no global client is available.
 
     Args:
         device_uid: Device unique identifier
@@ -76,20 +112,54 @@ def publish_device_command(device_uid: str, command: str) -> bool:
     Returns:
         True if published successfully
     """
-    client = get_mqtt_client()
-    if not client or not client.is_connected():
-        print(f"⚠️ MQTT client not connected, cannot send command to {device_uid}")
-        return False
+    import time
 
     topic = f"devices/{device_uid}/commands"
     payload = json.dumps({"command": command})
 
-    result = client.publish(topic, payload, qos=1)
-    if result.rc == mqtt.MQTT_ERR_SUCCESS:
-        print(f"📤 Command sent to {device_uid}: {command}")
-        return True
-    else:
-        print(f"❌ Failed to send command to {device_uid}: {result.rc}")
+    # Try global client first (for mqtt processor)
+    client = get_mqtt_client()
+    if client and client.is_connected():
+        result = client.publish(topic, payload, qos=1)
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            print(f"📤 Command sent to {device_uid}: {command}")
+            return True
+        else:
+            print(f"❌ Failed to send command to {device_uid}: {result.rc}")
+            return False
+
+    # Create temporary connection (for bot/api which run in separate containers)
+    try:
+        temp_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        temp_client.connect(settings.mqtt_broker, settings.mqtt_port, keepalive=10)
+        temp_client.loop_start()
+
+        # Wait for connection (max 1 second)
+        for _ in range(10):
+            if temp_client.is_connected():
+                break
+            time.sleep(0.1)
+
+        if not temp_client.is_connected():
+            print(f"⚠️ Could not connect to MQTT broker")
+            temp_client.loop_stop()
+            return False
+
+        result = temp_client.publish(topic, payload, qos=1)
+        result.wait_for_publish(timeout=5)
+
+        temp_client.loop_stop()
+        temp_client.disconnect()
+
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            print(f"📤 Command sent to {device_uid}: {command} (via temp connection)")
+            return True
+        else:
+            print(f"❌ Failed to send command to {device_uid}: {result.rc}")
+            return False
+
+    except Exception as e:
+        print(f"❌ MQTT error sending command to {device_uid}: {e}")
         return False
 
 
