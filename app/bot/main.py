@@ -1493,6 +1493,7 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
                 f"Код: <code>{device.activation_code}</code>\n"
                 f"Интервал: {device.send_interval} сек\n"
                 f"Прошивка: {device.firmware_version or '—'}\n"
+                f"ОС: {device.os_version or '—'}\n"
                 f"IP: {device.last_ip or '—'}\n"
             )
 

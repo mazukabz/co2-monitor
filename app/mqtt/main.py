@@ -233,6 +233,7 @@ class MQTTProcessor:
                 device.last_seen = datetime.utcnow()
                 device.last_ip = payload.get("ip")
                 device.firmware_version = payload.get("firmware_version")
+                device.os_version = payload.get("os_version")
 
                 await session.commit()
                 print(f"💾 Saved telemetry for {device_uid}")

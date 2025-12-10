@@ -103,6 +103,34 @@ def get_local_ip() -> str:
         return "unknown"
 
 
+def get_os_info() -> str:
+    """Get OS version info (e.g., 'Debian 12 bookworm' or 'Raspbian 11 bullseye')."""
+    try:
+        # Try /etc/os-release first (most Linux distros)
+        os_release = Path("/etc/os-release")
+        if os_release.exists():
+            info = {}
+            for line in os_release.read_text().splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    info[key] = value.strip('"')
+            # Format: "Debian 12 (bookworm)" or "Raspbian GNU/Linux 11 (bullseye)"
+            name = info.get("PRETTY_NAME", "")
+            if name:
+                return name
+            # Fallback to ID + VERSION_ID
+            return f"{info.get('ID', 'Linux')} {info.get('VERSION_ID', '')}"
+    except Exception:
+        pass
+
+    # Fallback to platform module
+    try:
+        import platform
+        return f"{platform.system()} {platform.release()}"
+    except Exception:
+        return "unknown"
+
+
 # ==================== SCD41 SENSOR ====================
 
 class SCD41Sensor:
@@ -330,6 +358,7 @@ class CO2MQTTClient:
         self.device_uid = get_device_uid(config)
         self.version = get_version()
         self.local_ip = get_local_ip()
+        self.os_version = get_os_info()
         self.start_time = time.time()
 
         # MQTT topics
@@ -433,6 +462,7 @@ class CO2MQTTClient:
             "timestamp": datetime.utcnow().isoformat(),
             "ip": self.local_ip,
             "firmware_version": self.version,
+            "os_version": self.os_version,
             "uptime": int(time.time() - self.start_time),
         }
 

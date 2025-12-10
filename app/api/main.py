@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "2.0.1"
+FIRMWARE_VERSION = "2.0.2"
 FIRMWARE_DATE = "2025-12-10"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Fix SSD1306 display font (adafruit-circuitpython-framebuf)"
+FIRMWARE_CHANGELOG = "Add OS version to telemetry, fix display font"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")

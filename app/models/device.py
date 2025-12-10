@@ -24,6 +24,7 @@ class Device(Base):
 
     # Device info
     firmware_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    os_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     last_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
     # Device settings (can be pushed via MQTT)
