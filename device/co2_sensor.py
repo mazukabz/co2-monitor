@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CO2 Monitor - Main Device Script v2.1.0
+CO2 Monitor - Main Device Script v2.1.1
 
 This script is updated via OTA from server.
 It reads SCD41 sensor data and sends to MQTT broker.
@@ -233,18 +233,15 @@ class SCD41Sensor:
         if not (0 <= humidity <= 100):
             return False
 
-        # Check for sudden jumps (if we have previous reading)
+        # Note: Removed CO2 jump validation - SCD41 is reliable and
+        # breathing on sensor can cause rapid 4000+ ppm changes in seconds.
+        # The sensor itself handles noise filtering internally.
+
+        # Temperature shouldn't jump more than 10C per reading
+        # (breathing on sensor can warm it up quickly)
         if self._last_valid_reading:
-            last_co2 = self._last_valid_reading["co2"]
             last_temp = self._last_valid_reading["temperature"]
-
-            # CO2 shouldn't jump more than 500 ppm per reading
-            if abs(co2 - last_co2) > 500:
-                print(f"CO2 jump too large: {last_co2} -> {co2}")
-                return False
-
-            # Temperature shouldn't jump more than 3C per reading
-            if abs(temp - last_temp) > 3:
+            if abs(temp - last_temp) > 10:
                 print(f"Temperature jump too large: {last_temp} -> {temp}")
                 return False
 
