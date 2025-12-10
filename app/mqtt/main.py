@@ -100,14 +100,15 @@ def publish_device_config(device_uid: str, config: dict) -> bool:
         return False
 
 
-def publish_device_command(device_uid: str, command: str) -> bool:
+def publish_device_command(device_uid: str, command: str, **kwargs) -> bool:
     """
     Publish command to a device.
     Creates a temporary MQTT connection if no global client is available.
 
     Args:
         device_uid: Device unique identifier
-        command: Command name (e.g., "force_update", "restart", "status")
+        command: Command name (e.g., "force_update", "restart", "status", "live_mode", "display_on", "display_off")
+        **kwargs: Additional command parameters (e.g., duration for live_mode)
 
     Returns:
         True if published successfully
@@ -115,7 +116,9 @@ def publish_device_command(device_uid: str, command: str) -> bool:
     import time
 
     topic = f"devices/{device_uid}/commands"
-    payload = json.dumps({"command": command})
+    command_data = {"command": command}
+    command_data.update(kwargs)  # Add extra params like duration
+    payload = json.dumps(command_data)
 
     # Try global client first (for mqtt processor)
     client = get_mqtt_client()

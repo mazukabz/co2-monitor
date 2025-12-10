@@ -29,6 +29,10 @@ class Device(Base):
 
     # Device settings (can be pushed via MQTT)
     send_interval: Mapped[int] = mapped_column(Integer, default=60)  # seconds
+    display_enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # OLED display on/off
+
+    # Live mode (temporary high-frequency telemetry)
+    live_mode_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Status
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)

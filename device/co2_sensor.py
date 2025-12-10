@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CO2 Monitor - Main Device Script v2.0.0
+CO2 Monitor - Main Device Script v2.1.0
 
 This script is updated via OTA from server.
 It reads SCD41 sensor data and sends to MQTT broker.
@@ -11,6 +11,9 @@ Features:
 - MQTT telemetry with auto-reconnect
 - Remote configuration updates
 - Force update command via MQTT
+- Smart polling: display every 5s, MQTT at send_interval
+- Live mode: high-frequency telemetry (5s) for specified duration
+- Display control: enable/disable OLED via MQTT command
 """
 
 import json
@@ -396,6 +399,10 @@ class Display:
 class CO2MQTTClient:
     """MQTT client for telemetry and commands."""
 
+    # Constants
+    DISPLAY_INTERVAL = 5  # SCD41 updates every 5 seconds
+    LIVE_MODE_INTERVAL = 5  # Send telemetry every 5 seconds in live mode
+
     def __init__(self, config: dict, sensor: SCD41Sensor, display: Display = None):
         import paho.mqtt.client as mqtt
 
@@ -426,6 +433,11 @@ class CO2MQTTClient:
         self.connected = False
         self.running = False
         self._force_update_requested = False
+
+        # Display and live mode state
+        self._display_enabled = config.get("display_enabled", True)
+        self._live_mode_until = 0  # Unix timestamp when live mode ends (0 = disabled)
+        self._last_reading = None  # Cache last sensor reading
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         """Handle MQTT connection."""
@@ -463,11 +475,25 @@ class CO2MQTTClient:
 
     def _apply_config(self, new_config: dict):
         """Apply new configuration from server."""
+        changed = False
+
         if "send_interval" in new_config:
             self.config["send_interval"] = new_config["send_interval"]
             print(f"Send interval updated to {self.config['send_interval']}s")
+            changed = True
 
-            # Save to config file
+        if "display_enabled" in new_config:
+            self._display_enabled = new_config["display_enabled"]
+            self.config["display_enabled"] = new_config["display_enabled"]
+            print(f"Display {'enabled' if self._display_enabled else 'disabled'}")
+            changed = True
+
+            # Clear display if disabled
+            if not self._display_enabled and self.display:
+                self.display.clear()
+
+        # Save to config file
+        if changed:
             try:
                 with open(CONFIG_FILE, "w") as f:
                     json.dump(self.config, f, indent=2)
@@ -491,15 +517,54 @@ class CO2MQTTClient:
             # Send immediate status
             self._send_telemetry()
 
-    def _send_telemetry(self) -> bool:
-        """Send sensor data to server and update display."""
-        data = self.sensor.read()
+        elif cmd == "live_mode":
+            # Enable live mode for specified duration (minutes)
+            duration_minutes = command.get("duration", 5)
+            self._live_mode_until = time.time() + (duration_minutes * 60)
+            print(f"Live mode enabled for {duration_minutes} minutes")
+
+        elif cmd == "live_mode_off":
+            # Disable live mode
+            self._live_mode_until = 0
+            print("Live mode disabled")
+
+        elif cmd == "display_on":
+            self._display_enabled = True
+            self.config["display_enabled"] = True
+            print("Display enabled")
+            # Save to config
+            try:
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(self.config, f, indent=2)
+            except Exception:
+                pass
+
+        elif cmd == "display_off":
+            self._display_enabled = False
+            self.config["display_enabled"] = False
+            print("Display disabled")
+            if self.display:
+                self.display.clear()
+            # Save to config
+            try:
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(self.config, f, indent=2)
+            except Exception:
+                pass
+
+    def _update_display(self, data: dict):
+        """Update display with sensor data."""
+        if not self._display_enabled or not self.display:
+            return
+        self.display.show(data["co2"], data["temperature"], data["humidity"])
+
+    def _send_telemetry(self, data: dict = None) -> bool:
+        """Send sensor data to server."""
+        # Use provided data or read from sensor
+        if data is None:
+            data = self.sensor.read()
         if data is None:
             return False
-
-        # Update display with current readings
-        if self.display:
-            self.display.show(data["co2"], data["temperature"], data["humidity"])
 
         payload = {
             "device_uid": self.device_uid,
@@ -524,6 +589,17 @@ class CO2MQTTClient:
             print(f"Failed to send telemetry: {e}")
             return False
 
+    def _is_live_mode_active(self) -> bool:
+        """Check if live mode is currently active."""
+        if self._live_mode_until == 0:
+            return False
+        if time.time() > self._live_mode_until:
+            # Live mode expired
+            self._live_mode_until = 0
+            print("Live mode expired")
+            return False
+        return True
+
     def connect(self) -> bool:
         """Connect to MQTT broker."""
         try:
@@ -547,32 +623,66 @@ class CO2MQTTClient:
             return False
 
     def run(self):
-        """Main telemetry loop."""
+        """
+        Main telemetry loop with smart polling.
+
+        Polling logic:
+        - If display ON: poll every 5 seconds for display, send MQTT at send_interval
+        - If live mode ON: poll every 5 seconds, send MQTT every 5 seconds
+        - If display OFF and live OFF: poll only at send_interval
+        """
         if not self.connect():
             print("Failed to connect to MQTT broker")
             return
 
         self.running = True
-        last_send = 0
+        last_display_update = 0
+        last_mqtt_send = 0
 
         try:
             while self.running:
                 now = time.time()
 
-                # Send telemetry at interval
-                if now - last_send >= self.config["send_interval"]:
-                    if self.connected:
-                        self._send_telemetry()
-                    else:
+                # Check if live mode is active
+                live_mode = self._is_live_mode_active()
+
+                # Determine effective MQTT interval
+                mqtt_interval = self.LIVE_MODE_INTERVAL if live_mode else self.config["send_interval"]
+
+                # Determine if we need to poll sensor
+                need_display_update = (
+                    self._display_enabled and
+                    (now - last_display_update >= self.DISPLAY_INTERVAL)
+                )
+                need_mqtt_send = (now - last_mqtt_send >= mqtt_interval)
+
+                # Read sensor only if needed (single read serves both display and MQTT)
+                if need_display_update or need_mqtt_send:
+                    if not self.connected:
                         print("Not connected, attempting reconnect...")
                         try:
                             self.client.reconnect()
                         except Exception:
                             pass
+                        time.sleep(1)
+                        continue
 
-                    last_send = now
+                    # Read sensor once
+                    reading = self.sensor.read()
 
-                time.sleep(1)
+                    if reading:
+                        # Update display if needed
+                        if need_display_update:
+                            self._update_display(reading)
+                            last_display_update = now
+
+                        # Send MQTT if needed
+                        if need_mqtt_send:
+                            self._send_telemetry(reading)
+                            last_mqtt_send = now
+
+                # Sleep briefly to avoid busy loop
+                time.sleep(0.5)
 
         except KeyboardInterrupt:
             print("\nStopping...")

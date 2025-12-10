@@ -25,9 +25,9 @@ from app.core.config import settings
 # Update these values when releasing new device firmware
 # Device will compare dates and update if server version is newer
 
-FIRMWARE_VERSION = "2.0.7"
+FIRMWARE_VERSION = "2.1.0"
 FIRMWARE_DATE = "2025-12-11"  # YYYY-MM-DD format
-FIRMWARE_CHANGELOG = "Huge adaptive CO2 display - scale 7 for 3 digits, scale 5 for 4 digits, centered"
+FIRMWARE_CHANGELOG = "Smart polling: display updates every 5s, Live mode support (5/10/15 min), Display on/off control via MQTT"
 
 # Path to device scripts (mounted in Docker at /app/device)
 DEVICE_DIR = Path("/app/device")

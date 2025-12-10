@@ -118,8 +118,8 @@ def get_live_duration_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="5 мин", callback_data="live:5"),
-            InlineKeyboardButton(text="30 мин", callback_data="live:30"),
-            InlineKeyboardButton(text="1 час", callback_data="live:60"),
+            InlineKeyboardButton(text="10 мин", callback_data="live:10"),
+            InlineKeyboardButton(text="15 мин", callback_data="live:15"),
         ],
     ])
 
@@ -1263,9 +1263,18 @@ async def callback_live(callback: CallbackQuery):
             )
             return
 
+    # Send MQTT command to device to enable live mode
+    from app.mqtt.main import publish_device_command
+    success = publish_device_command(device.device_uid, "live_mode", duration=duration_minutes)
+
+    if success:
+        live_mode_status = "✅ Устройство переключено в live режим"
+    else:
+        live_mode_status = "⚠️ Не удалось переключить устройство (offline)"
+
     # Send initial message
     live_msg = await callback.message.answer(
-        "📡 <b>Запуск Live режима...</b>",
+        f"📡 <b>Запуск Live режима...</b>\n\n{live_mode_status}",
         parse_mode="HTML",
         reply_markup=get_live_stop_keyboard()
     )
@@ -1485,6 +1494,8 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
             status = "🟢 Online" if online else "🔴 Offline"
             last_seen_text = format_time_ago(device.last_seen) if device.last_seen else "—"
 
+            display_status = "ВКЛ" if device.display_enabled else "ВЫКЛ"
+
             text = (
                 f"📱 <b>{device.name or device.device_uid}</b>\n\n"
                 f"UID: <code>{device.device_uid}</code>\n"
@@ -1492,10 +1503,15 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
                 f"Последняя связь: {last_seen_text}\n"
                 f"Код: <code>{device.activation_code}</code>\n"
                 f"Интервал: {device.send_interval} сек\n"
+                f"Дисплей: {display_status}\n"
                 f"Прошивка: {device.firmware_version or '—'}\n"
                 f"ОС: {device.os_version or '—'}\n"
                 f"IP: {device.last_ip or '—'}\n"
             )
+
+            # Display toggle button text
+            display_btn_text = "📺 Дисплей: ВЫКЛ" if device.display_enabled else "📺 Дисплей: ВКЛ"
+            display_action = "display_off" if device.display_enabled else "display_on"
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
@@ -1503,6 +1519,9 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
                     InlineKeyboardButton(text="60с", callback_data=f"admin:interval:{device_id}:60"),
                     InlineKeyboardButton(text="120с", callback_data=f"admin:interval:{device_id}:120"),
                     InlineKeyboardButton(text="300с", callback_data=f"admin:interval:{device_id}:300"),
+                ],
+                [
+                    InlineKeyboardButton(text=display_btn_text, callback_data=f"admin:{display_action}:{device_id}"),
                 ],
                 [
                     InlineKeyboardButton(text="🔄 Force Update", callback_data=f"admin:force_update:{device_id}"),
@@ -1601,6 +1620,74 @@ async def callback_admin(callback: CallbackQuery, state: FSMContext):
             else:
                 await callback.message.answer(
                     f"⚠️ Не удалось отправить команду. Устройство offline.",
+                    reply_markup=get_main_keyboard()
+                )
+
+    elif action == "display_on":
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            # Update database
+            device.display_enabled = True
+            await session.commit()
+
+            # Send command to device
+            from app.mqtt.main import publish_device_command
+            success = publish_device_command(device.device_uid, "display_on")
+
+            if success:
+                await callback.message.answer(
+                    f"📺 <b>Дисплей включён</b>\n\n"
+                    f"📱 {device.name or device.device_uid}",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await callback.message.answer(
+                    f"⚠️ Настройка сохранена, но устройство offline.",
+                    reply_markup=get_main_keyboard()
+                )
+
+    elif action == "display_off":
+        device_id = int(parts[2])
+
+        async with async_session_maker() as session:
+            device_result = await session.execute(
+                select(Device).where(Device.id == device_id)
+            )
+            device = device_result.scalar_one_or_none()
+
+            if not device:
+                await callback.message.answer("❌ Устройство не найдено")
+                return
+
+            # Update database
+            device.display_enabled = False
+            await session.commit()
+
+            # Send command to device
+            from app.mqtt.main import publish_device_command
+            success = publish_device_command(device.device_uid, "display_off")
+
+            if success:
+                await callback.message.answer(
+                    f"📺 <b>Дисплей выключен</b>\n\n"
+                    f"📱 {device.name or device.device_uid}",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await callback.message.answer(
+                    f"⚠️ Настройка сохранена, но устройство offline.",
                     reply_markup=get_main_keyboard()
                 )
 
