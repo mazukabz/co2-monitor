@@ -853,14 +853,15 @@ def generate_period_report(
     ax_bottom.axhline(y=0.08, xmin=0.0, xmax=1.0, color=COLORS['grid'], linewidth=0.5)
 
     zone_items = [
-        (COLORS['accent_green'], f'<800: {time_excellent:.0f}%'),
-        (COLORS['accent_yellow'], f'800-1000: {time_good:.0f}%'),
-        (COLORS['accent_orange'], f'1000-1500: {time_moderate:.0f}%'),
-        (COLORS['accent_red'], f'>1500: {time_bad:.0f}%'),
+        (COLORS['accent_green_dark'], f'<600: {time_excellent:.0f}%'),
+        (COLORS['accent_green'], f'600-800: {time_good:.0f}%'),
+        (COLORS['accent_yellow'], f'800-1000: {time_normal:.0f}%'),
+        (COLORS['accent_orange'], f'1000-1500: {time_bad:.0f}%'),
+        (COLORS['accent_red'], f'>1500: {time_critical:.0f}%'),
     ]
 
     for i, (color, text) in enumerate(zone_items):
-        x_pos = 0.03 + i * 0.24
+        x_pos = 0.02 + i * 0.19  # 5 items: 0.02 + 5*0.19 = 0.97
         ax_bottom.plot(x_pos, 0.0, 's', color=color, markersize=12,
                       transform=ax_bottom.transAxes)
         ax_bottom.text(x_pos + 0.03, 0.0, text, fontsize=16,
