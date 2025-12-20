@@ -51,6 +51,7 @@ services:
     container_name: co2_processor
     environment:
       - DATABASE_URL=${DATABASE_URL}
+      - BOT_TOKEN=${BOT_TOKEN}  # Для отправки уведомлений о превышении CO2
       - MQTT_BROKER=co2_mqtt
       - MQTT_PORT=1883  # Внутренний порт Docker, НЕ внешний!
       - TZ=${TZ:-Europe/Moscow}

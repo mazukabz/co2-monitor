@@ -8,8 +8,9 @@ import json
 import random
 import signal
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 
+import aiohttp
 import paho.mqtt.client as mqtt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,12 @@ from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.device import Device
 from app.models.telemetry import Telemetry
+from app.models.user import User
+
+# Cooldown для уведомлений: {user_id: last_alert_datetime}
+# Не отправлять чаще чем раз в ALERT_COOLDOWN_MINUTES
+_alert_cooldown: dict[int, datetime] = {}
+ALERT_COOLDOWN_MINUTES = 15
 
 
 def generate_activation_code() -> str:
@@ -26,6 +33,63 @@ def generate_activation_code() -> str:
     # Remove ambiguous characters: O, 0, I, 1, L
     chars = chars.replace("O", "").replace("0", "").replace("I", "").replace("1", "").replace("L", "")
     return "".join(random.choices(chars, k=8))
+
+
+def _can_send_alert(user_id: int) -> bool:
+    """Check if we can send alert to user (cooldown check)."""
+    last_alert = _alert_cooldown.get(user_id)
+    if last_alert is None:
+        return True
+    return datetime.utcnow() - last_alert > timedelta(minutes=ALERT_COOLDOWN_MINUTES)
+
+
+def _mark_alert_sent(user_id: int):
+    """Mark that alert was sent to user."""
+    _alert_cooldown[user_id] = datetime.utcnow()
+
+
+async def send_co2_alert(
+    telegram_id: int,
+    device_name: str,
+    co2: int,
+    threshold: int,
+    temperature: float,
+    humidity: float
+):
+    """Send CO2 alert to user via Telegram API."""
+    if not settings.bot_token:
+        print("⚠️ BOT_TOKEN not set, cannot send alerts")
+        return False
+
+    message = (
+        f"⚠️ <b>Высокий уровень CO2!</b>\n\n"
+        f"📱 Устройство: {device_name}\n"
+        f"🔴 CO2: <b>{co2} ppm</b> (порог: {threshold})\n"
+        f"🌡 Температура: {temperature:.1f}°C\n"
+        f"💧 Влажность: {humidity:.0f}%\n\n"
+        f"💨 Рекомендуется проветрить помещение."
+    )
+
+    url = f"https://api.telegram.org/bot{settings.bot_token}/sendMessage"
+    payload = {
+        "chat_id": telegram_id,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=10) as resp:
+                if resp.status == 200:
+                    print(f"🔔 Alert sent to user {telegram_id}: CO2={co2}ppm")
+                    return True
+                else:
+                    error = await resp.text()
+                    print(f"❌ Failed to send alert: {resp.status} - {error}")
+                    return False
+    except Exception as e:
+        print(f"❌ Error sending alert: {e}")
+        return False
 
 
 # Global reference to MQTT client for config push
@@ -216,6 +280,10 @@ class MQTTProcessor:
 
     async def _process_telemetry(self, device_uid: str, payload: dict):
         """Process and save telemetry data."""
+        co2 = payload.get("co2", 0)
+        temperature = payload.get("temperature", 0)
+        humidity = payload.get("humidity", 0)
+
         async with async_session_maker() as session:
             try:
                 # Get or create device
@@ -224,9 +292,9 @@ class MQTTProcessor:
                 # Save telemetry
                 telemetry = Telemetry(
                     device_id=device.id,
-                    co2=payload.get("co2", 0),
-                    temperature=payload.get("temperature", 0),
-                    humidity=payload.get("humidity", 0),
+                    co2=co2,
+                    temperature=temperature,
+                    humidity=humidity,
                     timestamp=datetime.utcnow()
                 )
                 session.add(telemetry)
@@ -241,9 +309,58 @@ class MQTTProcessor:
                 await session.commit()
                 print(f"💾 Saved telemetry for {device_uid}")
 
+                # Check CO2 threshold and send alert if needed
+                if device.owner_telegram_id:
+                    await self._check_and_send_alert(
+                        session, device, co2, temperature, humidity
+                    )
+
             except Exception as e:
                 await session.rollback()
                 print(f"❌ Database error: {e}")
+
+    async def _check_and_send_alert(
+        self,
+        session: AsyncSession,
+        device: Device,
+        co2: int,
+        temperature: float,
+        humidity: float
+    ):
+        """Check if CO2 exceeds user threshold and send alert."""
+        # Get device owner
+        result = await session.execute(
+            select(User).where(User.telegram_id == device.owner_telegram_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return
+
+        # Check if alerts are enabled and CO2 exceeds threshold
+        if not user.alerts_enabled:
+            return
+
+        if co2 <= user.alert_threshold:
+            return
+
+        # Check cooldown
+        if not _can_send_alert(user.telegram_id):
+            return
+
+        # Send alert
+        device_name = device.name or device.device_uid
+        success = await send_co2_alert(
+            telegram_id=user.telegram_id,
+            device_name=device_name,
+            co2=co2,
+            threshold=user.alert_threshold,
+            temperature=temperature,
+            humidity=humidity
+        )
+
+        if success:
+            _mark_alert_sent(user.telegram_id)
 
     async def _get_or_create_device(
         self, session: AsyncSession, device_uid: str, payload: dict
