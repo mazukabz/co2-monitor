@@ -11,6 +11,7 @@ env:
 
 jobs:
   deploy:
+    if: false  # ВРЕМЕННО ОТКЛЮЧЕНО - ручной деплой
     runs-on: ubuntu-latest
 
     steps:
