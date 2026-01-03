@@ -277,33 +277,39 @@ sudo bash ~/co2-monitor/install_service.sh
 
 ### SSH Tunnel (удалённый доступ к RPi)
 
-Reverse SSH туннель для доступа к Raspberry Pi из любого места:
+Reverse SSH туннель для доступа к Raspberry Pi 5 из любого места.
 
+**Архитектура:**
 ```
 [MacBook] --> [Server:2222] <-- [RPi tunnel] <-- [RPi SSH:22]
+     ^                              ^
+     |                              |
+  id_rpi key                   tunnel_key
 ```
 
-**Быстрый старт:**
+**Быстрое подключение:**
 ```bash
-# Подключение к RPi (после настройки)
+# Через alias (если настроен ~/.ssh/config)
 ssh co2-rpi
-# или
-ssh -p 2222 mazukabz@31.59.170.64
+
+# Напрямую через туннель
+ssh -i ~/.ssh/id_rpi -p 2222 mazukabz@31.59.170.64
+
+# Просмотр логов CO2 сервиса
+ssh co2-rpi "journalctl -u co2-monitor -n 50 --no-pager"
+
+# Просмотр логов в реальном времени
+ssh co2-rpi "journalctl -u co2-monitor -f"
 ```
 
-**Настройка нового устройства:**
-```bash
-# 1. На RPi — установить туннель
-curl -sL http://31.59.170.64:10900/tunnel-setup.sh | bash
-
-# 2. Скопировать PUBLIC KEY и отправить админу
-
-# 3. На сервере — добавить ключ
-echo "ssh-ed25519 AAAA... device_name" >> /opt/apps/ssh-tunnels/.ssh/authorized_keys
-
-# 4. На RPi — запустить туннель
-sudo systemctl start ssh-tunnel
-```
+**Текущее устройство:**
+| Параметр | Значение |
+|----------|----------|
+| Устройство | Raspberry Pi 5 (piserver) |
+| Сервер | 31.59.170.64 |
+| Порт туннеля | 2222 |
+| Пользователь на RPi | mazukabz |
+| Ключ | ~/.ssh/id_rpi |
 
 **Настройка MacBook (~/.ssh/config):**
 ```
@@ -314,21 +320,28 @@ Host co2-rpi
   IdentityFile ~/.ssh/id_rpi
 ```
 
-**Ключи без пароля!** Если ключ с паролем — будет "Permission denied":
+**Полезные команды на RPi:**
 ```bash
-# Создать ключ без пароля
-ssh-keygen -t ed25519 -f ~/.ssh/id_rpi -N ""
-# Добавить публичный ключ на RPi
-ssh co2-rpi "echo 'ssh-ed25519 AAAA...' >> ~/.ssh/authorized_keys"
+# Статус CO2 сервиса
+sudo systemctl status co2-monitor
+
+# Перезапуск сервиса
+sudo systemctl restart co2-monitor
+
+# Статус SSH туннеля
+sudo systemctl status ssh-tunnel
+
+# Проверка I2C устройств (SCD41=0x62, SSD1306=0x3c)
+i2cdetect -y 1
 ```
 
 **Порты туннелей:**
 | Порт | Устройство |
 |------|------------|
-| 2222 | CO2 Monitor RPi |
+| 2222 | CO2 Monitor RPi 5 |
 | 2223-2230 | Зарезервировано |
 
-**Подробная документация:** [ssh-tunnels/README.md](../0.1%20SSH%20Tunnel/README.md)
+**Подробная документация:** [ssh-tunnels/README.md](ssh-tunnels/README.md)
 
 ## Структура проекта
 
