@@ -181,7 +181,7 @@ sudo reboot
 {"send_interval": 30}
 ```
 
-Команды через `devices/{DEVICE_UID}/command`:
+Команды через `devices/{DEVICE_UID}/commands`:
 - `{"command": "force_update"}` — перезапустить с проверкой обновлений
 - `{"command": "restart"}` — просто перезапустить
 
